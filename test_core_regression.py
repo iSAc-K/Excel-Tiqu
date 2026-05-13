@@ -265,6 +265,30 @@ class CoreRegressionTests(unittest.TestCase):
         rows = read_summary_rows(self.output_path)
         self.assertEqual(rows[0]["order_id"], "ORDER-FOLDER")
 
+    def test_folder_mode_copies_modify_excel_file_to_skip_folder(self) -> None:
+        workbook_path = self.input_dir / f"{MODIFY_PREFIX}-0507-WZY-knife-1order-1pc.xlsx"
+        make_order_workbook(workbook_path, [("ORDER-MODIFY-FOLDER", "SKU-MODIFY", 1)])
+
+        result = self.run_tool(input_mode="folders")
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["total_rows"], 0)
+        self.assertEqual(result["written_rows"], 0)
+        self.assertFalse(self.output_path.exists())
+        self.assertTrue((self.input_dir / SKIP_FOLDER_NAME / workbook_path.name).exists())
+
+    def test_folder_mode_modify_excel_dry_run_does_not_create_skip_folder(self) -> None:
+        workbook_path = self.input_dir / f"{MODIFY_PREFIX}-0507-WZY-knife-1order-1pc.xlsx"
+        make_order_workbook(workbook_path, [("ORDER-MODIFY-DRY", "SKU-MODIFY", 1)])
+
+        result = self.run_tool(input_mode="folders", dry_run=True)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["total_rows"], 0)
+        self.assertEqual(result["written_rows"], 0)
+        self.assertFalse(self.output_path.exists())
+        self.assertFalse((self.input_dir / SKIP_FOLDER_NAME).exists())
+
     def test_mixed_mode_extracts_archive_and_folder_excel_files(self) -> None:
         folder_excel = self.input_dir / "folder-orders" / "0507-WZY-knife-1order-2pcs.xlsx"
         folder_excel.parent.mkdir(parents=True)
@@ -279,6 +303,43 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual(result["written_rows"], 2)
         rows = sorted(read_summary_rows(self.output_path), key=lambda item: str(item["order_id"]))
         self.assertEqual([row["order_id"] for row in rows], ["ORDER-ARCHIVE-MIX", "ORDER-FOLDER-MIX"])
+
+    def test_mixed_mode_single_excel_input_has_no_archive_format_error(self) -> None:
+        workbook_path = self.input_dir / "0507-WZY-knife-1order-3pcs.xlsx"
+        make_order_workbook(workbook_path, [("ORDER-SINGLE-XLSX", "SKU-SINGLE", 3)])
+
+        result = run_extract(
+            str(workbook_path),
+            str(self.output_path),
+            clear=True,
+            workers=1,
+            report_dir=str(self.logs_dir),
+            backup_dir=str(self.backups_dir),
+            input_mode="mixed",
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["written_rows"], 1)
+        self.assertEqual(result["error_count"], 0)
+        self.assertEqual(result["exception_logs"], [])
+        rows = read_summary_rows(self.output_path)
+        self.assertEqual(rows[0]["order_id"], "ORDER-SINGLE-XLSX")
+
+    def test_mixed_mode_ignores_archives_inside_generated_skip_folder(self) -> None:
+        skipped_dir = self.input_dir / SKIP_FOLDER_NAME
+        skipped_dir.mkdir()
+        ignored_excel = self.work_dir / "0506-WZY-knife-1order-9pcs.xlsx"
+        make_order_workbook(ignored_excel, [("ORDER-IGNORED-SKIP", "SKU-IGNORED", 9)])
+        make_zip(skipped_dir / "ignored.zip", [(ignored_excel, ignored_excel.name)])
+        real_excel = self.input_dir / "real.xlsx"
+        make_order_workbook(real_excel, [("ORDER-REAL-MIX", "SKU-REAL", 1)])
+
+        result = self.run_tool(input_mode="mixed")
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["written_rows"], 1)
+        rows = read_summary_rows(self.output_path)
+        self.assertEqual([row["order_id"] for row in rows], ["ORDER-REAL-MIX"])
 
     def test_single_file_mode_skips_multiple_excel_files_in_one_folder_unit(self) -> None:
         folder = self.input_dir / "same-unit"
@@ -326,6 +387,22 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual(result["written_rows"], 2)
         rows = sorted(read_summary_rows(self.output_path), key=lambda item: str(item["order_id"]))
         self.assertEqual([row["order_id"] for row in rows], ["ORDER-ZIP-A", "ORDER-ZIP-B"])
+
+    def test_multi_file_summary_mode_returns_validation_for_each_excel(self) -> None:
+        first = self.work_dir / "0507-WZY-knife-1order-1pc.xlsx"
+        second = self.work_dir / "0508-WZY-knife-1order-2pcs.xlsx"
+        make_order_workbook(first, [("ORDER-VALIDATION-A", "SKU-A", 1)])
+        make_order_workbook(second, [("ORDER-VALIDATION-B", "SKU-B", 2)])
+        make_zip(self.input_dir / "multi_validation.zip", [(first, first.name), (second, second.name)])
+
+        result = self.run_tool(excel_group_mode="multi")
+
+        self.assertTrue(result["success"])
+        validation_names = {item["Excel文件名"] for item in result["filename_validations"]}
+        self.assertEqual(validation_names, {first.name, second.name})
+        archive_excel_names = result["archive_details"][0]["正式Excel文件"]
+        self.assertIn(first.name, archive_excel_names)
+        self.assertIn(second.name, archive_excel_names)
 
     def test_modify_archive_is_copied_to_skip_folder_and_excluded_from_output(self) -> None:
         workbook_path = self.work_dir / "0507-WZY-knife-1order-1pc.xlsx"

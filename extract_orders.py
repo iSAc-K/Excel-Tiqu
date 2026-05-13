@@ -23,6 +23,13 @@ from openpyxl.utils import get_column_letter
 ARCHIVE_EXTENSIONS = {".zip", ".rar", ".7z"}
 EXCEL_EXTENSIONS = {".xlsx", ".xlsm"}
 HC_FOLDER_NAME = "HC"
+INPUT_MODE_ARCHIVES = "archives"
+INPUT_MODE_FOLDERS = "folders"
+INPUT_MODE_MIXED = "mixed"
+INPUT_MODES = {INPUT_MODE_ARCHIVES, INPUT_MODE_FOLDERS, INPUT_MODE_MIXED}
+EXCEL_GROUP_SINGLE = "single"
+EXCEL_GROUP_MULTI = "multi"
+EXCEL_GROUP_MODES = {EXCEL_GROUP_SINGLE, EXCEL_GROUP_MULTI}
 OUTPUT_HEADERS = ["亚马逊订单号", "SKU", "数量", "日期"]
 CORE_HEADER_LABELS = {
     "order_id": "亚马逊订单号",
@@ -336,11 +343,12 @@ def find_archive_files(input_path: str | Path) -> list[Path]:
 
     if path.is_dir():
         add_log(f"开始扫描压缩包文件夹：{path}")
+        excluded_folder_names = {HC_FOLDER_NAME, build_skip_dir(path).name, "跳过不处理"}
         archives = sorted(
             file
             for file in path.rglob("*")
             if file.is_file() and file.suffix.lower() in ARCHIVE_EXTENSIONS
-            and "跳过不处理" not in file.relative_to(path).parts
+            and not set(file.relative_to(path).parts[:-1]).intersection(excluded_folder_names)
         )
         add_log(f"找到压缩包：{len(archives)} 个")
         return archives
@@ -444,6 +452,44 @@ def find_excel_files_in_extracted_dir(root_dir: Path) -> list[Path]:
 
         excel_files.append(file_path)
 
+    return excel_files
+
+
+def find_folder_excel_files(input_path: str | Path) -> list[Path]:
+    path = Path(input_path).expanduser()
+    if path.is_file():
+        suffix = path.suffix.lower()
+        if path.name.startswith("~$"):
+            return []
+        if suffix == ".xls":
+            add_log(f"跳过文件：{path.name}，暂不支持 .xls")
+            return []
+        if suffix in EXCEL_EXTENSIONS:
+            add_log(f"输入为单个 Excel 文件：{path}")
+            return [path]
+        return []
+
+    if not path.is_dir():
+        return []
+
+    add_log(f"开始扫描文件夹里的 Excel：{path}")
+    excluded_folder_names = {HC_FOLDER_NAME, build_skip_dir(path).name}
+    excel_files: list[Path] = []
+    for file_path in sorted(path.rglob("*")):
+        if not file_path.is_file():
+            continue
+        relative_parts = set(file_path.relative_to(path).parts[:-1])
+        if relative_parts.intersection(excluded_folder_names):
+            continue
+        if file_path.name.startswith("~$"):
+            continue
+        suffix = file_path.suffix.lower()
+        if suffix == ".xls":
+            add_log(f"跳过文件：{file_path.name}，暂不支持 .xls")
+            continue
+        if suffix in EXCEL_EXTENSIONS:
+            excel_files.append(file_path)
+    add_log(f"找到文件夹 Excel：{len(excel_files)} 个")
     return excel_files
 
 
@@ -1152,10 +1198,13 @@ def process_excel_unit(
     category_keywords: dict[str, list[str]] | None = None,
     skip_dir: Path | None = None,
     dry_run: bool = False,
+    excel_group_mode: str = EXCEL_GROUP_SINGLE,
+    copy_skipped_excel_file: bool = False,
 ) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     quantity_error_rows: list[dict[str, Any]] = []
     header_report_rows: list[dict[str, Any]] = []
+    filename_validations: list[dict[str, Any]] = []
     excel_count = len(excel_files)
     selected_excel_name = "；".join(str(file.relative_to(extracted_root)) for file in excel_files)
     category = ""
@@ -1202,6 +1251,7 @@ def process_excel_unit(
             "rows": list(rows),
             "archive_detail": archive_detail,
             "filename_validation": dict(filename_validation or {}),
+            "filename_validations": list(filename_validations),
             "quantity_error_rows": list(quantity_error_rows),
             "header_report_rows": list(header_report_rows),
             "ignored": ignored,
@@ -1213,12 +1263,69 @@ def process_excel_unit(
         add_structured_error(archive_path, "子文件夹未找到正式Excel", reason, subfolder_name)
         return build_result(False, "跳过", skip=True, reason=reason)
 
-    if excel_count > 1:
+    if excel_count > 1 and excel_group_mode == EXCEL_GROUP_SINGLE:
         reason = "子文件夹中识别到多个正式 Excel"
         related = "；".join(str(file.relative_to(extracted_root)) for file in excel_files)
         add_exception(f"异常：{archive_path.name} / {subfolder_name or '.'} 中识别到多个正式 Excel，已跳过该子文件夹\n{related}")
         add_structured_error(archive_path, "子文件夹多个正式Excel", reason, related)
         return build_result(False, "跳过", skip=True, reason=reason)
+
+    if excel_group_mode == EXCEL_GROUP_MULTI:
+        copied_to = ""
+        for excel_file in excel_files:
+            if subfolder_name:
+                add_log(f"子文件夹：{subfolder_name}")
+            add_log(f"[{archive_path.name}] 找到正式 Excel：{excel_file.name}")
+            if excel_file.stem.startswith("修改"):
+                reason = "文件名前两个字为“修改”"
+                skipped_source = excel_file if copy_skipped_excel_file else archive_path
+                copied_to = copy_skipped_source(skipped_source, skip_dir, dry_run=dry_run)
+                add_log(f"[{archive_path.name}] 已跳过：{excel_file.name}，原因：{reason}")
+                add_structured_error(
+                    archive_path,
+                    "修改文件跳过",
+                    f"{reason}；原文件名：{excel_file.name}；已复制到：{copied_to}",
+                    excel_file.name,
+                    status="已跳过",
+                )
+                continue
+
+            extracted_rows, workbook_success, current_category, current_date_text, current_header_rows = extract_rows_from_workbook(
+                excel_file,
+                category_keywords,
+            )
+            for row in current_header_rows:
+                row["压缩包名"] = archive_path.name
+                row["子文件夹名"] = subfolder_name
+            header_report_rows.extend(current_header_rows)
+            for row in extracted_rows:
+                row["外层压缩包名"] = archive_path.name
+                row["子文件夹名"] = subfolder_name
+            if not workbook_success:
+                continue
+
+            current_validation, current_quantity_errors = build_filename_validation(
+                archive_path.name,
+                excel_file.name,
+                extracted_rows,
+                current_category,
+                current_date_text,
+                subfolder_name,
+            )
+            filename_validations.append(current_validation)
+            if filename_validation is None:
+                filename_validation = current_validation
+            quantity_error_rows.extend(current_quantity_errors)
+            if not category:
+                category = current_category
+            if not date_text:
+                date_text = current_date_text
+            rows.extend(extracted_rows)
+
+        if rows:
+            add_log(f"[{archive_path.name}] 目标工作表：{rows[0]['category']}")
+            return build_result(True, "成功", copied_to=copied_to)
+        return build_result(False, "异常", skip=True, reason="Excel 读取失败或未识别到任何核心表头")
 
     excel_file = excel_files[0]
     selected_excel_name = excel_file.name
@@ -1227,7 +1334,8 @@ def process_excel_unit(
     add_log(f"[{archive_path.name}] 找到正式 Excel：{excel_file.name}")
     if excel_file.stem.startswith("修改"):
         reason = "文件名前两个字为“修改”"
-        copied_to = copy_skipped_source(archive_path, skip_dir, dry_run=dry_run)
+        skipped_source = excel_file if copy_skipped_excel_file else archive_path
+        copied_to = copy_skipped_source(skipped_source, skip_dir, dry_run=dry_run)
         add_log(f"[{archive_path.name}] 已跳过：{excel_file.name}，原因：{reason}")
         add_structured_error(
             archive_path,
@@ -1259,6 +1367,7 @@ def process_excel_unit(
         date_text,
         subfolder_name,
     )
+    filename_validations.append(filename_validation)
     if rows:
         add_log(f"[{archive_path.name}] 目标工作表：{rows[0]['category']}")
     return build_result(True, "成功")
@@ -1270,6 +1379,8 @@ def process_archive(
     skip_dir: Path | None = None,
     hc_dir: Path | None = None,
     dry_run: bool = False,
+    enable_hc_filter: bool = False,
+    excel_group_mode: str = EXCEL_GROUP_SINGLE,
 ) -> dict[str, Any]:
     """
     处理单个压缩包：
@@ -1374,7 +1485,10 @@ def process_archive(
 
         try:
             excel_files = find_excel_files_in_extracted_dir(extracted_root)
-            hc_files, normal_excel_files = split_hc_excel_files(excel_files)
+            if enable_hc_filter:
+                hc_files, normal_excel_files = split_hc_excel_files(excel_files)
+            else:
+                hc_files, normal_excel_files = [], excel_files
             if hc_files and hc_dir is not None:
                 for hc_file in hc_files:
                     hc_report_rows.append(copy_or_preview_hc_excel(archive_path, extracted_root, hc_file, hc_dir, dry_run))
@@ -1409,11 +1523,14 @@ def process_archive(
                     category_keywords,
                     skip_dir,
                     dry_run,
+                    excel_group_mode=excel_group_mode,
                 )
                 rows.extend(unit_result.get("rows") or [])
                 if unit_result.get("archive_detail"):
                     archive_details.append(unit_result["archive_detail"])
-                if unit_result.get("filename_validation"):
+                if unit_result.get("filename_validations"):
+                    filename_validations.extend(unit_result["filename_validations"])
+                elif unit_result.get("filename_validation"):
                     filename_validations.append(unit_result["filename_validation"])
                 quantity_error_rows.extend(unit_result.get("quantity_error_rows") or [])
                 header_report_rows.extend(unit_result.get("header_report_rows") or [])
@@ -1429,6 +1546,93 @@ def process_archive(
         add_exception(f"异常：处理压缩包失败 {archive_path.name}，原因：{exc}")
         add_structured_error(archive_path, "处理失败", f"处理压缩包失败，原因：{exc}")
         return build_result(False, reason=f"处理压缩包失败，原因：{exc}")
+    finally:
+        clear_thread_log_context()
+
+
+def build_folder_processing_groups(input_root: Path, excel_files: list[Path]) -> list[tuple[Path, list[Path]]]:
+    grouped: dict[Path, list[Path]] = {}
+    for excel_file in excel_files:
+        grouped.setdefault(excel_file.parent, []).append(excel_file)
+    return [(folder, sorted(files)) for folder, files in sorted(grouped.items(), key=lambda item: str(item[0]))]
+
+
+def process_folder_excel_group(
+    input_root: Path,
+    unit_folder: Path,
+    excel_files: list[Path],
+    category_keywords: dict[str, list[str]] | None = None,
+    skip_dir: Path | None = None,
+    hc_dir: Path | None = None,
+    dry_run: bool = False,
+    enable_hc_filter: bool = False,
+    excel_group_mode: str = EXCEL_GROUP_SINGLE,
+) -> dict[str, Any]:
+    virtual_archive = unit_folder
+    folder_process_logs: list[str] = []
+    folder_exception_logs: list[str] = []
+    folder_error_report_rows: list[dict[str, Any]] = []
+    folder_debug_logs: list[str] = []
+    set_thread_log_context(
+        virtual_archive,
+        folder_process_logs,
+        folder_exception_logs,
+        folder_error_report_rows,
+        folder_debug_logs,
+    )
+    archive_details: list[dict[str, Any]] = []
+    hc_report_rows: list[dict[str, Any]] = []
+
+    def build_result(result: dict[str, Any], ignored: bool = False) -> dict[str, Any]:
+        return {
+            "archive_path": virtual_archive,
+            "archive_name": virtual_archive.name,
+            "success": bool(result.get("success")),
+            "rows": list(result.get("rows") or []),
+            "exception_logs": list(folder_exception_logs),
+            "process_logs": list(folder_process_logs),
+            "debug_logs": list(folder_debug_logs),
+            "error_report_rows": list(folder_error_report_rows),
+            "archive_details": list(archive_details or ([result["archive_detail"]] if result.get("archive_detail") else [])),
+            "filename_validations": list(result.get("filename_validations") or ([result["filename_validation"]] if result.get("filename_validation") else [])),
+            "quantity_error_rows": list(result.get("quantity_error_rows") or []),
+            "header_report_rows": list(result.get("header_report_rows") or []),
+            "hc_report_rows": list(hc_report_rows),
+            "ignored": ignored or bool(result.get("ignored")),
+        }
+
+    try:
+        if enable_hc_filter:
+            hc_files, normal_excel_files = split_hc_excel_files(excel_files)
+        else:
+            hc_files, normal_excel_files = [], excel_files
+
+        if hc_files and hc_dir is not None:
+            for hc_file in hc_files:
+                hc_report_rows.append(copy_or_preview_hc_excel(virtual_archive, input_root, hc_file, hc_dir, dry_run))
+
+        if hc_files and not normal_excel_files:
+            reason = "仅发现 HC 文件，已排除"
+            add_log(f"[{virtual_archive.name}] {reason}")
+            archive_details.append(build_hc_only_archive_detail(virtual_archive, input_root, hc_files, reason))
+            return build_result({"success": False, "rows": []}, ignored=True)
+
+        result = process_excel_unit(
+            virtual_archive,
+            input_root,
+            normal_excel_files,
+            unit_folder,
+            category_keywords,
+            skip_dir,
+            dry_run,
+            excel_group_mode=excel_group_mode,
+            copy_skipped_excel_file=True,
+        )
+        return build_result(result)
+    except Exception as exc:
+        add_exception(f"异常：处理文件夹 Excel 失败 {virtual_archive.name}，原因：{exc}")
+        add_structured_error(virtual_archive, "处理失败", f"处理文件夹 Excel 失败，原因：{exc}")
+        return build_result({"success": False, "rows": []})
     finally:
         clear_thread_log_context()
 
@@ -1939,6 +2143,20 @@ def save_debug_report(debug_rows: list[str], log_dir: str | Path | None = None) 
     except Exception as exc:
         add_exception(f"异常：保存 DEBUG 报告失败，原因：{exc}")
         return ""
+
+
+def normalize_input_mode(value: str | None) -> str:
+    mode = (value or INPUT_MODE_ARCHIVES).strip().lower()
+    if mode not in INPUT_MODES:
+        raise ValueError(f"input_mode 必须是 archives、folders 或 mixed，当前值：{value}")
+    return mode
+
+
+def normalize_excel_group_mode(value: str | None) -> str:
+    mode = (value or EXCEL_GROUP_SINGLE).strip().lower()
+    if mode not in EXCEL_GROUP_MODES:
+        raise ValueError(f"excel_group_mode 必须是 single 或 multi，当前值：{value}")
+    return mode
 
 
 def clamp_workers(workers: Any) -> int:
@@ -2459,6 +2677,9 @@ def run_extract(
     backup_dir: str | Path | None = None,
     log_callback: Callable[[str], None] | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    input_mode: str = INPUT_MODE_ARCHIVES,
+    enable_hc_filter: bool = False,
+    excel_group_mode: str = EXCEL_GROUP_SINGLE,
 ) -> dict[str, Any]:
     """
     给 GUI 和 CLI 共用的主入口。
@@ -2477,6 +2698,8 @@ def run_extract(
     start_time = datetime.now()
     output = Path(output_path).expanduser()
     normalized_workers = clamp_workers(workers)
+    normalized_input_mode = normalize_input_mode(input_mode)
+    normalized_excel_group_mode = normalize_excel_group_mode(excel_group_mode)
     logs_dir = Path(report_dir).expanduser() if report_dir else get_runtime_base_dir() / "logs"
     skip_dir = build_skip_dir(input_path)
     hc_dir = build_hc_dir(input_path)
@@ -2519,30 +2742,81 @@ def run_extract(
             pass
 
     try:
-        archives = find_archive_files(input_path)
-        stats["total_archives"] = len(archives)
+        input_item = Path(input_path).expanduser()
+        input_root = input_item if input_item.is_dir() else input_item.parent
+        archives: list[Path] = []
+        folder_groups: list[tuple[Path, list[Path]]] = []
+        should_scan_archives = normalized_input_mode == INPUT_MODE_ARCHIVES or (
+            normalized_input_mode == INPUT_MODE_MIXED
+            and (input_item.is_dir() or input_item.suffix.lower() in ARCHIVE_EXTENSIONS)
+        )
+        if should_scan_archives:
+            archives = find_archive_files(input_path)
+        if normalized_input_mode in {INPUT_MODE_FOLDERS, INPUT_MODE_MIXED}:
+            folder_excel_files = find_folder_excel_files(input_path)
+            folder_groups = build_folder_processing_groups(input_root, folder_excel_files)
 
-        if not archives:
+        total_tasks = len(archives) + len(folder_groups)
+        stats["total_archives"] = total_tasks
+
+        if total_tasks == 0:
             add_log("没有找到可处理的压缩包")
             add_log("处理完成，总计提取：0 行")
             success = not exception_logs
         else:
             with ThreadPoolExecutor(max_workers=normalized_workers) as executor:
                 future_map = {}
-                for index, archive_path in enumerate(archives, 1):
+                task_index = 0
+                for archive_path in archives:
+                    task_index += 1
                     emit_progress(
                         {
                             "current": 0,
-                            "total": len(archives),
+                            "total": total_tasks,
                             "archive_name": archive_path.name,
                             "status": "queued",
-                            "active_workers": min(normalized_workers, len(archives)),
+                            "active_workers": min(normalized_workers, total_tasks),
                             "completed_archives": 0,
                             "failed_archives": 0,
                         }
                     )
-                    future = executor.submit(process_archive, archive_path, category_keywords, skip_dir, hc_dir, dry_run)
-                    future_map[future] = (index, archive_path)
+                    future = executor.submit(
+                        process_archive,
+                        archive_path,
+                        category_keywords,
+                        skip_dir,
+                        hc_dir,
+                        dry_run,
+                        enable_hc_filter,
+                        normalized_excel_group_mode,
+                    )
+                    future_map[future] = (task_index, archive_path)
+                for unit_folder, unit_files in folder_groups:
+                    task_index += 1
+                    emit_progress(
+                        {
+                            "current": 0,
+                            "total": total_tasks,
+                            "archive_name": unit_folder.name,
+                            "status": "queued",
+                            "active_workers": min(normalized_workers, total_tasks),
+                            "completed_archives": 0,
+                            "failed_archives": 0,
+                        }
+                    )
+                    future = executor.submit(
+                        process_folder_excel_group,
+                        input_root,
+                        unit_folder,
+                        unit_files,
+                        category_keywords,
+                        skip_dir,
+                        hc_dir,
+                        dry_run,
+                        enable_hc_filter,
+                        normalized_excel_group_mode,
+                    )
+                    future_map[future] = (task_index, unit_folder)
 
                 completed_count = 0
                 failed_count = 0
@@ -2597,17 +2871,17 @@ def run_extract(
                     emit_progress(
                         {
                             "current": completed_count,
-                            "total": len(archives),
+                            "total": total_tasks,
                             "archive_name": archive_path.name,
                             "status": result_status,
-                            "active_workers": min(normalized_workers, max(0, len(archives) - completed_count)),
+                            "active_workers": min(normalized_workers, max(0, total_tasks - completed_count)),
                             "completed_archives": completed_count,
                             "failed_archives": failed_count,
                         }
                     )
 
             ignored_archives = 0
-            for index in range(1, len(archives) + 1):
+            for index in range(1, total_tasks + 1):
                 result = archive_results_by_index[index]
                 process_logs.extend(result.get("process_logs") or [])
                 debug_logs.extend(result.get("debug_logs") or [])
@@ -2634,7 +2908,7 @@ def run_extract(
                     stats["skipped_archives"] += 1
 
             if ignored_archives:
-                stats["total_archives"] = max(0, len(archives) - ignored_archives)
+                stats["total_archives"] = max(0, total_tasks - ignored_archives)
             stats["extracted_rows"] = len(all_rows)
             stats["hc_file_count"] = len(hc_report_rows)
             stats["hc_copy_failed_count"] = sum(1 for row in hc_report_rows if row.get("处理状态") == "复制失败，已排除")
@@ -2737,6 +3011,8 @@ def run_extract(
         "process_logs": list(process_logs),
         "debug_logs": list(debug_logs),
         "error_report_rows": list(error_report_rows),
+        "archive_details": list(archive_details),
+        "filename_validations": list(filename_validations),
         "header_report_rows": list(header_report_rows),
         "hc_report_rows": list(hc_report_rows),
         "duplicate_report_rows": list(duplicate_report_rows),
@@ -2780,6 +3056,9 @@ def main() -> None:
     parser.add_argument("--settings", default=None, help="GUI 设置文件路径，命令行运行时仅保留兼容参数")
     parser.add_argument("--report-dir", default=None, help="处理日志和处理报告保存目录，默认使用程序目录下的 logs")
     parser.add_argument("--backup-dir", default=None, help="旧汇总 Excel 备份目录，默认使用程序目录下的 backups")
+    parser.add_argument("--input-mode", choices=sorted(INPUT_MODES), default=INPUT_MODE_ARCHIVES, help="输入来源：archives 只处理压缩包，folders 只处理文件夹 Excel，mixed 混合模式")
+    parser.add_argument("--enable-hc-filter", action="store_true", help="启用 HC 文件过滤；默认不启用")
+    parser.add_argument("--excel-group-mode", choices=sorted(EXCEL_GROUP_MODES), default=EXCEL_GROUP_SINGLE, help="Excel 处理规则：single 单文件订单模式，multi 多文件汇总模式")
     args = parser.parse_args()
 
     result = run_extract(
@@ -2793,6 +3072,9 @@ def main() -> None:
         category_config_path=args.category_config,
         report_dir=args.report_dir,
         backup_dir=args.backup_dir,
+        input_mode=args.input_mode,
+        enable_hc_filter=args.enable_hc_filter,
+        excel_group_mode=args.excel_group_mode,
     )
     print_logs(
         result.get("stats"),
