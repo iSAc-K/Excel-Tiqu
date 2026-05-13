@@ -648,7 +648,7 @@ class ExtractOrdersApp(ctk.CTk):
     def _build_start_page(self) -> None:
         page = self.make_page("start")
         page.grid_columnconfigure(0, weight=1)
-        page.grid_rowconfigure(3, weight=1)
+        page.grid_rowconfigure(4, weight=1)
 
         intro = ctk.CTkFrame(page, fg_color="#ffffff", corner_radius=8)
         intro.grid(row=0, column=0, sticky="ew", pady=(0, 14))
@@ -702,7 +702,7 @@ class ExtractOrdersApp(ctk.CTk):
         self._build_options(self.options_frame)
 
         filler = ctk.CTkFrame(page, fg_color="transparent")
-        filler.grid(row=3, column=0, sticky="nsew")
+        filler.grid(row=4, column=0, sticky="nsew")
 
     def _build_options(self, frame: ctk.CTkFrame) -> None:
         ctk.CTkLabel(frame, text="处理选项", font=ctk.CTkFont(size=16, weight="bold")).grid(row=0, column=0, columnspan=3, sticky="w", padx=18, pady=(18, 8))
