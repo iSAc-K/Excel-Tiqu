@@ -81,6 +81,9 @@ class CoreRegressionTests(unittest.TestCase):
         dry_run: bool = False,
         skip_exact_duplicates: bool = True,
         clear: bool = True,
+        input_mode: str = "archives",
+        excel_group_mode: str = "single",
+        enable_hc_filter: bool = False,
     ) -> dict:
         return run_extract(
             str(self.input_dir),
@@ -91,6 +94,9 @@ class CoreRegressionTests(unittest.TestCase):
             report_dir=str(self.logs_dir),
             backup_dir=str(self.backups_dir),
             skip_exact_duplicates=skip_exact_duplicates,
+            input_mode=input_mode,
+            excel_group_mode=excel_group_mode,
+            enable_hc_filter=enable_hc_filter,
         )
 
     def test_fixture_helpers_create_readable_order_zip(self) -> None:
@@ -244,6 +250,82 @@ class CoreRegressionTests(unittest.TestCase):
         rows = sorted(read_summary_rows(self.output_path), key=lambda item: str(item["order_id"]))
         self.assertEqual([row["order_id"] for row in rows], ["ORDER-SUB-1", "ORDER-SUB-2"])
         self.assertTrue(Path(result["process_report_path"]).exists())
+
+    def test_folder_mode_recursively_extracts_excel_files(self) -> None:
+        nested = self.input_dir / "orders" / "day-1"
+        nested.mkdir(parents=True)
+        workbook_path = nested / "0507-WZY-knife-1order-4pcs.xlsx"
+        make_order_workbook(workbook_path, [("ORDER-FOLDER", "SKU-FOLDER", 4)])
+
+        result = self.run_tool(input_mode="folders")
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["total_rows"], 1)
+        self.assertEqual(result["written_rows"], 1)
+        rows = read_summary_rows(self.output_path)
+        self.assertEqual(rows[0]["order_id"], "ORDER-FOLDER")
+
+    def test_mixed_mode_extracts_archive_and_folder_excel_files(self) -> None:
+        folder_excel = self.input_dir / "folder-orders" / "0507-WZY-knife-1order-2pcs.xlsx"
+        folder_excel.parent.mkdir(parents=True)
+        make_order_workbook(folder_excel, [("ORDER-FOLDER-MIX", "SKU-FOLDER", 2)])
+        archive_excel = self.work_dir / "0508-WZY-knife-1order-3pcs.xlsx"
+        make_order_workbook(archive_excel, [("ORDER-ARCHIVE-MIX", "SKU-ARCHIVE", 3)])
+        make_zip(self.input_dir / "archive_orders.zip", [(archive_excel, archive_excel.name)])
+
+        result = self.run_tool(input_mode="mixed")
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["written_rows"], 2)
+        rows = sorted(read_summary_rows(self.output_path), key=lambda item: str(item["order_id"]))
+        self.assertEqual([row["order_id"] for row in rows], ["ORDER-ARCHIVE-MIX", "ORDER-FOLDER-MIX"])
+
+    def test_single_file_mode_skips_multiple_excel_files_in_one_folder_unit(self) -> None:
+        folder = self.input_dir / "same-unit"
+        folder.mkdir()
+        make_order_workbook(folder / "0507-WZY-knife-1order-1pc.xlsx", [("ORDER-A", "SKU-A", 1)])
+        make_order_workbook(folder / "0508-WZY-knife-1order-2pcs.xlsx", [("ORDER-B", "SKU-B", 2)])
+
+        result = self.run_tool(input_mode="folders", excel_group_mode="single")
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["total_rows"], 0)
+        self.assertEqual(result["written_rows"], 0)
+        self.assertFalse(self.output_path.exists())
+        self.assertGreaterEqual(result["skipped_archives"], 1)
+        skip_details = "\n".join(
+            str(item) for item in result.get("exception_logs", []) + result.get("error_report_rows", [])
+        )
+        self.assertIn("多个正式 Excel", skip_details)
+        self.assertIn("0507-WZY-knife-1order-1pc.xlsx", skip_details)
+        self.assertIn("0508-WZY-knife-1order-2pcs.xlsx", skip_details)
+
+    def test_multi_file_summary_mode_extracts_multiple_excel_files_in_one_folder_unit(self) -> None:
+        folder = self.input_dir / "same-unit"
+        folder.mkdir()
+        make_order_workbook(folder / "0507-WZY-knife-1order-1pc.xlsx", [("ORDER-A", "SKU-A", 1)])
+        make_order_workbook(folder / "0508-WZY-knife-1order-2pcs.xlsx", [("ORDER-B", "SKU-B", 2)])
+
+        result = self.run_tool(input_mode="folders", excel_group_mode="multi")
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["written_rows"], 2)
+        rows = sorted(read_summary_rows(self.output_path), key=lambda item: str(item["order_id"]))
+        self.assertEqual([row["order_id"] for row in rows], ["ORDER-A", "ORDER-B"])
+
+    def test_multi_file_summary_mode_applies_inside_archives(self) -> None:
+        first = self.work_dir / "0507-WZY-knife-1order-1pc.xlsx"
+        second = self.work_dir / "0508-WZY-knife-1order-2pcs.xlsx"
+        make_order_workbook(first, [("ORDER-ZIP-A", "SKU-A", 1)])
+        make_order_workbook(second, [("ORDER-ZIP-B", "SKU-B", 2)])
+        make_zip(self.input_dir / "multi_excel.zip", [(first, first.name), (second, second.name)])
+
+        result = self.run_tool(excel_group_mode="multi")
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["written_rows"], 2)
+        rows = sorted(read_summary_rows(self.output_path), key=lambda item: str(item["order_id"]))
+        self.assertEqual([row["order_id"] for row in rows], ["ORDER-ZIP-A", "ORDER-ZIP-B"])
 
     def test_modify_archive_is_copied_to_skip_folder_and_excluded_from_output(self) -> None:
         workbook_path = self.work_dir / "0507-WZY-knife-1order-1pc.xlsx"

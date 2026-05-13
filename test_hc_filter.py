@@ -44,7 +44,7 @@ class HcFilterTests(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.base, ignore_errors=True)
 
-    def run_tool(self, *, dry_run: bool = False) -> dict:
+    def run_tool(self, *, dry_run: bool = False, enable_hc_filter: bool = False, input_mode: str = "archives") -> dict:
         return run_extract(
             str(self.input_dir),
             str(self.output_path),
@@ -53,6 +53,8 @@ class HcFilterTests(unittest.TestCase):
             workers=1,
             report_dir=str(self.logs_dir),
             backup_dir=str(self.backups_dir),
+            enable_hc_filter=enable_hc_filter,
+            input_mode=input_mode,
         )
 
     def test_hc_detection_uses_excel_file_name_only(self) -> None:
@@ -62,14 +64,14 @@ class HcFilterTests(unittest.TestCase):
 
         self.assertFalse(is_hc_excel_file(Path("HC-parent") / "normal_order.xlsx"))
 
-    def test_hc_excel_is_copied_and_excluded_from_output(self) -> None:
+    def test_hc_filter_enabled_copies_and_excludes_from_output(self) -> None:
         normal = self.base / "normal_order.xlsx"
         hc_file = self.base / "HC.xlsx"
         make_order_workbook(normal, "ORDER-NORMAL", "SKU-NORMAL", 2)
         make_order_workbook(hc_file, "ORDER-HC", "SKU-HC", 99)
         make_zip(self.input_dir / "orders.zip", [normal, hc_file])
 
-        result = self.run_tool()
+        result = self.run_tool(enable_hc_filter=True)
 
         self.assertTrue(result["success"])
         self.assertEqual(result["total_rows"], 1)
@@ -83,6 +85,28 @@ class HcFilterTests(unittest.TestCase):
         self.assertEqual(len(result["hc_report_rows"]), 1)
         self.assertEqual(result["rows"][0]["亚马逊订单号"], "ORDER-NORMAL")
 
+    def test_hc_filter_default_off_treats_hc_as_normal_excel_and_skips_multi_excel_unit(self) -> None:
+        normal = self.base / "normal_order.xlsx"
+        hc_file = self.base / "HC.xlsx"
+        make_order_workbook(normal, "ORDER-NORMAL", "SKU-NORMAL", 2)
+        make_order_workbook(hc_file, "ORDER-HC", "SKU-HC", 99)
+        make_zip(self.input_dir / "orders.zip", [normal, hc_file])
+
+        result = self.run_tool()
+
+        self.assertFalse((self.input_dir / "HC").exists())
+        self.assertEqual(result["stats"]["hc_file_count"], 0)
+        self.assertEqual(result["total_rows"], 0)
+        self.assertEqual(result["written_rows"], 0)
+        self.assertFalse(self.output_path.exists())
+        self.assertGreaterEqual(result["skipped_archives"], 1)
+        skip_details = "\n".join(
+            str(item) for item in result.get("exception_logs", []) + result.get("error_report_rows", [])
+        )
+        self.assertIn("多个正式 Excel", skip_details)
+        self.assertIn("normal_order.xlsx", skip_details)
+        self.assertIn("HC.xlsx", skip_details)
+
     def test_dry_run_does_not_create_hc_folder_or_output(self) -> None:
         normal = self.base / "normal_order.xlsx"
         hc_file = self.base / "hc.xlsx"
@@ -90,7 +114,7 @@ class HcFilterTests(unittest.TestCase):
         make_order_workbook(hc_file, "ORDER-HC", "SKU-HC", 99)
         make_zip(self.input_dir / "orders.zip", [normal, hc_file])
 
-        result = self.run_tool(dry_run=True)
+        result = self.run_tool(dry_run=True, enable_hc_filter=True)
 
         self.assertTrue(result["success"])
         self.assertEqual(result["total_rows"], 1)
@@ -115,7 +139,7 @@ class HcFilterTests(unittest.TestCase):
             return original_copy2(source, target)
 
         with patch("extract_orders.shutil.copy2", side_effect=failing_copy):
-            result = self.run_tool()
+            result = self.run_tool(enable_hc_filter=True)
 
         self.assertTrue(result["success"])
         self.assertEqual(result["total_rows"], 1)
