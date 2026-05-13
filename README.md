@@ -1,6 +1,6 @@
 # Excel 订单数据提取工具 v1.3
 
-本工具用于批量处理压缩包里的 Excel 订单文件，把订单数据按品类汇总到一个 Excel 文件中。普通用户建议使用图形界面，熟悉 PowerShell 的用户也可以使用命令行。
+本工具用于批量处理压缩包或文件夹里的 Excel 订单文件，把订单数据按品类汇总到一个 Excel 文件中。普通用户建议使用图形界面，熟悉 PowerShell 的用户也可以使用命令行。
 
 ## 1. v1.3 新增功能
 
@@ -9,8 +9,9 @@
 - 从正式 Excel 文件名识别预计单量和预计数量，例如 `0507-WZY-刀叉-13单18个.xlsx`。
 - 每次运行都生成处理报告 Excel：`logs/处理报告_YYYYMMDD_HHMMSS.xlsx`。
 - 写入旧汇总 Excel 前自动备份到 `backups/`，Dry Run 不备份、不写入。
-- GUI 会记住上次输入路径、输出路径、workers、clear、dry-run、重复检测等设置。
-- Excel 文件名包含 `HC`、`hc`、`Hc`、`hC` 时会作为 HC 文件排除，不参与订单提取和汇总。
+- GUI 会记住上次输入路径、输出路径、数据来源、HC 过滤、Excel 规则、workers、clear、dry-run、重复检测等设置。
+- 可选择只处理压缩包、只处理文件夹里的 Excel，或使用混合模式同时处理两类来源。
+- HC 过滤默认关闭；勾选后，文件名包含 `HC`、`hc`、`Hc`、`hC` 的 Excel 会作为 HC 文件排除，不参与订单提取和汇总。
 
 ## 2. 文件清单
 
@@ -36,12 +37,13 @@ python .\extract_orders_gui.py
 
 操作步骤：
 
-1. 选择压缩包所在文件夹。
+1. 选择输入路径。
 2. 选择汇总 Excel 保存位置。
-3. 设置是否清空旧数据、是否 Dry Run、workers 数量、重复检测选项。
-4. 如需调整品类，点击“品类关键词配置”。
-5. 点击“开始提取”。
-6. 完成后在日志中查看输出汇总 Excel、重复报告、处理报告、备份路径。
+3. 展开处理选项，选择数据来源、Excel 规则、是否过滤 HC 文件。
+4. 设置是否清空旧数据、是否 Dry Run、workers 数量、重复检测选项。
+5. 如需调整品类，点击“品类关键词配置”。
+6. 点击“开始提取”。
+7. 完成后在日志中查看输出汇总 Excel、重复报告、处理报告、备份路径。
 
 GUI 关闭时会自动保存上次路径和设置，下次打开会自动恢复。
 
@@ -74,6 +76,16 @@ python .\extract_orders.py --input "C:\订单压缩包" --output "C:\汇总.xlsx
 --workers           同时处理压缩包数量，范围 1-8
 --clear             先备份旧汇总，再清空重建
 --dry-run           只扫描、校验、生成日志和处理报告，不写汇总、不备份
+--input-mode        输入来源：archives 只处理压缩包，folders 只处理文件夹 Excel，mixed 混合模式
+--enable-hc-filter  启用 HC 文件过滤，默认不启用
+--excel-group-mode  Excel 规则：single 单文件订单模式，multi 多文件汇总模式
+```
+
+示例：
+
+```powershell
+python .\extract_orders.py --input "C:\订单文件夹" --output "C:\汇总.xlsx" --input-mode folders --excel-group-mode multi
+python .\extract_orders.py --input "C:\订单文件夹" --output "C:\汇总.xlsx" --input-mode mixed --enable-hc-filter
 ```
 
 ## 5. 品类关键词配置
@@ -195,7 +207,8 @@ backups/汇总_backup_20260509_153012.xlsx
 v1.1 功能继续保留：
 
 - 多个压缩包批量处理。
-- 多个正式 Excel 时跳过。
+- 单文件订单模式下，多个正式 Excel 时跳过。
+- 多文件汇总模式下，同一处理单元里的多个正式 Excel 会逐个提取并汇总。
 - `~$xxx.xlsx` 临时 Excel 自动忽略。
 - 重复订单号只提示。
 - 完全重复行按设置跳过。
@@ -205,13 +218,15 @@ v1.1 功能继续保留：
 
 ## 10. HC 文件过滤
 
-如果压缩包里的 Excel 文件名包含 `HC`（不区分大小写），工具会把它视为 HC 文件：
+HC 过滤默认关闭。关闭时，文件名包含 `HC`（不区分大小写）的 Excel 会按普通 Excel 参与处理。
+
+在 GUI 勾选“过滤 HC 文件”，或命令行使用 `--enable-hc-filter` 后，工具会把这类 Excel 视为 HC 文件：
 
 - 不参与订单提取。
 - 不参与数量统计。
 - 不参与重复检测。
 - 不写入汇总 Excel。
-- 正式运行时会复制到输入目录下的 `HC` 文件夹，原压缩包不会被改写。
+- 正式运行时会复制到输入目录下的 `HC` 文件夹，原始压缩包或原始文件夹不会被改写。
 - Dry Run 只在日志和处理报告中显示预计复制路径，不创建 `HC` 文件夹、不复制文件。
 
 判断规则只看 Excel 文件名本身，不看父级文件夹名。处理报告会生成 `HC文件明细` Sheet，记录来源文件、目标路径和复制状态。
