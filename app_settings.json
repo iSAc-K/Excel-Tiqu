@@ -6,6 +6,9 @@
   "dry_run": false,
   "detect_duplicate_orders": true,
   "skip_exact_duplicates": true,
+  "input_mode": "archives",
+  "enable_hc_filter": false,
+  "excel_group_mode": "single",
   "window_geometry": "1160x760",
   "selected_page": "start"
 }

@@ -44,6 +44,9 @@ DEFAULT_SETTINGS = {
     "dry_run": False,
     "detect_duplicate_orders": True,
     "skip_exact_duplicates": True,
+    "input_mode": "archives",
+    "enable_hc_filter": False,
+    "excel_group_mode": "single",
     "window_geometry": "1160x760",
     "selected_page": "start",
 }
@@ -53,6 +56,19 @@ PAGE_TITLES = {
     "progress": "进度日志",
     "reports": "报告与配置",
 }
+
+INPUT_MODE_LABELS = {
+    "只处理压缩包": "archives",
+    "只处理文件夹Excel": "folders",
+    "混合模式": "mixed",
+}
+INPUT_MODE_VALUES = {value: label for label, value in INPUT_MODE_LABELS.items()}
+
+EXCEL_GROUP_LABELS = {
+    "单文件订单模式": "single",
+    "多文件汇总模式": "multi",
+}
+EXCEL_GROUP_VALUES = {value: label for label, value in EXCEL_GROUP_LABELS.items()}
 
 
 def ensure_xlsx_suffix(path_text: str) -> str:
@@ -523,6 +539,9 @@ class ExtractOrdersApp(ctk.CTk):
         self.mode_var = tk.StringVar(value="预览模式" if self.dry_run_var.get() else "正式写入")
         self.detect_duplicates_var = tk.BooleanVar(value=bool(self.settings.get("detect_duplicate_orders", True)))
         self.skip_exact_duplicates_var = tk.BooleanVar(value=bool(self.settings.get("skip_exact_duplicates", True)))
+        self.input_mode_var = tk.StringVar(value=INPUT_MODE_VALUES.get(str(self.settings.get("input_mode") or "archives"), "只处理压缩包"))
+        self.enable_hc_filter_var = tk.BooleanVar(value=bool(self.settings.get("enable_hc_filter", False)))
+        self.excel_group_mode_var = tk.StringVar(value=EXCEL_GROUP_VALUES.get(str(self.settings.get("excel_group_mode") or "single"), "单文件订单模式"))
         self.workers_var = tk.IntVar(value=self.normalize_workers(self.settings.get("workers") or 4))
         self.status_var = tk.StringVar(value="请选择路径后开始提取")
         self.mode_status_var = tk.StringVar(value="")
@@ -640,7 +659,7 @@ class ExtractOrdersApp(ctk.CTk):
         paths = ctk.CTkFrame(page, fg_color="#ffffff", corner_radius=8)
         paths.grid(row=1, column=0, sticky="ew", pady=(0, 14))
         paths.grid_columnconfigure(1, weight=1)
-        self.add_path_row(paths, 0, "压缩包所在文件夹", self.input_var, "选择文件夹", self.choose_input_folder)
+        self.add_path_row(paths, 0, "输入路径", self.input_var, "选择文件夹", self.choose_input_folder)
         self.add_path_row(paths, 1, "汇总 Excel 保存位置", self.output_var, "选择保存位置", self.choose_output_file)
 
         controls = ctk.CTkFrame(page, fg_color="#ffffff", corner_radius=8)
@@ -695,13 +714,31 @@ class ExtractOrdersApp(ctk.CTk):
         self.workers_slider.grid(row=1, column=1, sticky="ew", padx=14, pady=(0, 10))
         ctk.CTkLabel(frame, text="建议 4；电脑性能较好可选 6-8", text_color="#64748b").grid(row=1, column=2, sticky="w", padx=(0, 18), pady=(0, 10))
 
+        ctk.CTkLabel(frame, text="数据来源", text_color="#172033").grid(row=2, column=0, sticky="w", padx=18, pady=(4, 8))
+        self.input_mode_menu = ctk.CTkOptionMenu(frame, values=list(INPUT_MODE_LABELS.keys()), variable=self.input_mode_var, command=lambda _value: self.update_top_status())
+        self.input_mode_menu.grid(row=2, column=1, sticky="w", padx=14, pady=(4, 8))
+
+        ctk.CTkLabel(frame, text="Excel 规则", text_color="#172033").grid(row=3, column=0, sticky="w", padx=18, pady=(4, 8))
+        self.excel_group_mode_menu = ctk.CTkOptionMenu(frame, values=list(EXCEL_GROUP_LABELS.keys()), variable=self.excel_group_mode_var, command=lambda _value: self.update_top_status())
+        self.excel_group_mode_menu.grid(row=3, column=1, sticky="w", padx=14, pady=(4, 8))
+        self.enable_hc_filter_check = ctk.CTkCheckBox(frame, text="过滤 HC 文件", variable=self.enable_hc_filter_var, command=self.update_top_status)
+        self.enable_hc_filter_check.grid(row=3, column=2, sticky="w", padx=(0, 18), pady=(4, 8))
+
         self.clear_check = ctk.CTkCheckBox(frame, text="清空旧汇总后重新生成", variable=self.clear_var, command=self.update_top_status)
-        self.clear_check.grid(row=2, column=0, sticky="w", padx=18, pady=(4, 12))
+        self.clear_check.grid(row=4, column=0, sticky="w", padx=18, pady=(4, 12))
         self.detect_duplicates_check = ctk.CTkCheckBox(frame, text="检测重复订单号，只提示不自动跳过", variable=self.detect_duplicates_var, command=self.update_top_status)
-        self.detect_duplicates_check.grid(row=2, column=1, sticky="w", padx=14, pady=(4, 12))
+        self.detect_duplicates_check.grid(row=4, column=1, sticky="w", padx=14, pady=(4, 12))
         self.skip_exact_duplicates_check = ctk.CTkCheckBox(frame, text="跳过完全重复行", variable=self.skip_exact_duplicates_var, command=self.update_top_status)
-        self.skip_exact_duplicates_check.grid(row=2, column=2, sticky="w", padx=(0, 18), pady=(4, 12))
-        self.start_controls.extend([self.workers_slider, self.clear_check, self.detect_duplicates_check, self.skip_exact_duplicates_check])
+        self.skip_exact_duplicates_check.grid(row=4, column=2, sticky="w", padx=(0, 18), pady=(4, 12))
+        self.start_controls.extend([
+            self.workers_slider,
+            self.input_mode_menu,
+            self.excel_group_mode_menu,
+            self.enable_hc_filter_check,
+            self.clear_check,
+            self.detect_duplicates_check,
+            self.skip_exact_duplicates_check,
+        ])
 
     def _build_progress_page(self) -> None:
         page = self.make_page("progress")
@@ -863,7 +900,8 @@ class ExtractOrdersApp(ctk.CTk):
         mode = "预览模式" if self.dry_run_var.get() else "正式写入"
         self.mode_var.set(mode)
         self.mode_status_var.set(f"模式：{mode}")
-        self.worker_status_var.set(f"并发：{self.workers_var.get()}")
+        hc_text = "过滤HC" if self.enable_hc_filter_var.get() else "不过滤HC"
+        self.worker_status_var.set(f"并发：{self.workers_var.get()} | {self.input_mode_var.get()} | {self.excel_group_mode_var.get()} | {hc_text}")
 
     def ensure_default_category_config(self) -> None:
         try:
@@ -882,6 +920,9 @@ class ExtractOrdersApp(ctk.CTk):
             "dry_run": self.dry_run_var.get(),
             "detect_duplicate_orders": self.detect_duplicates_var.get(),
             "skip_exact_duplicates": self.skip_exact_duplicates_var.get(),
+            "input_mode": self.selected_input_mode(),
+            "enable_hc_filter": self.enable_hc_filter_var.get(),
+            "excel_group_mode": self.selected_excel_group_mode(),
             "window_geometry": self.geometry(),
             "selected_page": self.selected_page,
         }
@@ -914,6 +955,12 @@ class ExtractOrdersApp(ctk.CTk):
             self.output_var.set(ensure_xlsx_suffix(path))
             self.save_current_settings()
 
+    def selected_input_mode(self) -> str:
+        return INPUT_MODE_LABELS.get(self.input_mode_var.get(), "archives")
+
+    def selected_excel_group_mode(self) -> str:
+        return EXCEL_GROUP_LABELS.get(self.excel_group_mode_var.get(), "single")
+
     def validate_inputs(self) -> tuple[bool, str, str]:
         input_path = self.input_var.get().strip()
         output_path = ensure_xlsx_suffix(self.output_var.get())
@@ -921,11 +968,14 @@ class ExtractOrdersApp(ctk.CTk):
             self.output_var.set(output_path)
 
         if not input_path:
-            messagebox.showwarning("提示", "请选择压缩包所在文件夹")
+            messagebox.showwarning("提示", "请选择输入路径")
             return False, "", ""
-        input_folder = Path(input_path).expanduser()
-        if not input_folder.exists() or not input_folder.is_dir():
-            messagebox.showwarning("提示", "压缩包文件夹不存在")
+        input_item = Path(input_path).expanduser()
+        if not input_item.exists():
+            messagebox.showwarning("提示", "输入路径不存在")
+            return False, "", ""
+        if not input_item.is_dir() and input_item.suffix.lower() not in {".zip", ".rar", ".7z", ".xlsx", ".xlsm"}:
+            messagebox.showwarning("提示", "输入路径必须是文件夹、压缩包或 Excel 文件")
             return False, "", ""
         if not output_path:
             messagebox.showwarning("提示", "请选择汇总 Excel 保存位置")
@@ -934,7 +984,7 @@ class ExtractOrdersApp(ctk.CTk):
         if not output_folder.exists() or not output_folder.is_dir():
             messagebox.showwarning("提示", "输出文件夹不存在")
             return False, "", ""
-        return True, str(input_folder), str(Path(output_path).expanduser())
+        return True, str(input_item), str(Path(output_path).expanduser())
 
     def get_workers(self) -> int:
         workers = self.normalize_workers(self.workers_var.get())
@@ -971,6 +1021,9 @@ class ExtractOrdersApp(ctk.CTk):
                 workers,
                 self.detect_duplicates_var.get(),
                 self.skip_exact_duplicates_var.get(),
+                self.selected_input_mode(),
+                self.enable_hc_filter_var.get(),
+                self.selected_excel_group_mode(),
             ),
             daemon=True,
         )
@@ -986,6 +1039,9 @@ class ExtractOrdersApp(ctk.CTk):
         workers: int,
         detect_duplicates: bool,
         skip_exact_duplicates: bool,
+        input_mode: str,
+        enable_hc_filter: bool,
+        excel_group_mode: str,
     ) -> None:
         def log_callback(message: str) -> None:
             self.log_queue.put(("log", message))
@@ -1009,6 +1065,9 @@ class ExtractOrdersApp(ctk.CTk):
                 backup_dir=runtime_base_dir() / "backups",
                 log_callback=log_callback,
                 progress_callback=progress_callback,
+                input_mode=input_mode,
+                enable_hc_filter=enable_hc_filter,
+                excel_group_mode=excel_group_mode,
             )
             self.log_queue.put(("done", result))
         except Exception as exc:
