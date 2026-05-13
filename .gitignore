@@ -1,0 +1,23 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Local dependency/cache folders
+.codex_test_deps/
+.pytest_cache/
+
+# Build and packaged artifacts
+build/
+dist/
+*.spec
+
+# Runtime outputs
+logs/
+backups/
+*.log
+
+# Acceptance scratch folders
+acceptance_*_tmp/
+
+# Excel temporary lock files
+~$*

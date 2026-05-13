@@ -1,0 +1,11 @@
+{
+  "last_input_path": "",
+  "last_output_path": "",
+  "workers": 4,
+  "clear": false,
+  "dry_run": false,
+  "detect_duplicate_orders": true,
+  "skip_exact_duplicates": true,
+  "window_geometry": "1160x760",
+  "selected_page": "start"
+}
