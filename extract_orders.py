@@ -876,6 +876,30 @@ def detect_category_from_filename(filename: str, category_keywords: dict[str, li
     return selected[2]
 
 
+def prefixed_reissue_skip_reason(filename: str, category_keywords: dict[str, list[str]] | None = None) -> str:
+    stem = Path(filename).stem
+    reissue_index = stem.find("补发")
+    if reissue_index < 0:
+        return ""
+
+    matches: list[tuple[int, int, int, str, str]] = []
+    keywords_config = category_keywords or CATEGORY_KEYWORDS
+    for category_index, (category, keywords) in enumerate(keywords_config.items()):
+        for keyword in keywords:
+            keyword_index = stem.find(keyword)
+            if keyword_index >= 0:
+                matches.append((keyword_index, len(keyword), category_index, category, keyword))
+
+    if not matches:
+        return ""
+
+    matches.sort(key=lambda item: (-item[1], item[2]))
+    keyword_index, _, _, category, keyword = matches[0]
+    if reissue_index < keyword_index:
+        return f"文件名中“补发”位于品类“{category}”前，跳过处理；命中关键词：{keyword}"
+    return ""
+
+
 def parse_expected_counts_from_filename(filename: str) -> tuple[int | None, int | None, str]:
     """
     从文件名中提取“预计单量”和“预计数量”。
@@ -1268,6 +1292,19 @@ def process_excel_unit(
             "ignored": ignored,
         }
 
+    def skip_excel_file(excel_file: Path, reason: str, skip_type: str) -> str:
+        skipped_source = excel_file if copy_skipped_excel_file else archive_path
+        copied_to = copy_skipped_source(skipped_source, skip_dir, dry_run=dry_run)
+        add_log(f"[{archive_path.name}] 已跳过：{excel_file.name}，原因：{reason}")
+        add_structured_error(
+            archive_path,
+            skip_type,
+            f"{reason}；原文件名：{excel_file.name}；已复制到：{copied_to}",
+            excel_file.name,
+            status="已跳过",
+        )
+        return copied_to
+
     if excel_count == 0:
         reason = "子文件夹未找到正式 Excel"
         add_exception(f"异常：{archive_path.name} / {subfolder_name or '.'} 未找到正式 Excel，已跳过")
@@ -1283,22 +1320,21 @@ def process_excel_unit(
 
     if excel_group_mode == EXCEL_GROUP_MULTI:
         copied_to = ""
+        skipped_reasons: list[str] = []
         for excel_file in excel_files:
             if subfolder_name:
                 add_log(f"子文件夹：{subfolder_name}")
             add_log(f"[{archive_path.name}] 找到正式 Excel：{excel_file.name}")
             if excel_file.stem.startswith("修改"):
                 reason = "文件名前两个字为“修改”"
-                skipped_source = excel_file if copy_skipped_excel_file else archive_path
-                copied_to = copy_skipped_source(skipped_source, skip_dir, dry_run=dry_run)
-                add_log(f"[{archive_path.name}] 已跳过：{excel_file.name}，原因：{reason}")
-                add_structured_error(
-                    archive_path,
-                    "修改文件跳过",
-                    f"{reason}；原文件名：{excel_file.name}；已复制到：{copied_to}",
-                    excel_file.name,
-                    status="已跳过",
-                )
+                skipped_reasons.append(reason)
+                copied_to = skip_excel_file(excel_file, reason, "修改文件跳过")
+                continue
+
+            reissue_reason = prefixed_reissue_skip_reason(excel_file.name, category_keywords)
+            if reissue_reason:
+                skipped_reasons.append(reissue_reason)
+                copied_to = skip_excel_file(excel_file, reissue_reason, "补发文件跳过")
                 continue
 
             extracted_rows, workbook_success, current_category, current_date_text, current_header_rows = extract_rows_from_workbook(
@@ -1337,6 +1373,8 @@ def process_excel_unit(
         if rows:
             add_log(f"[{archive_path.name}] 目标工作表：{rows[0]['category']}")
             return build_result(True, "成功", copied_to=copied_to)
+        if skipped_reasons:
+            return build_result(False, "跳过", skip=True, reason="；".join(skipped_reasons), ignored=True, copied_to=copied_to)
         return build_result(False, "异常", skip=True, reason="Excel 读取失败或未识别到任何核心表头")
 
     excel_file = excel_files[0]
@@ -1346,17 +1384,13 @@ def process_excel_unit(
     add_log(f"[{archive_path.name}] 找到正式 Excel：{excel_file.name}")
     if excel_file.stem.startswith("修改"):
         reason = "文件名前两个字为“修改”"
-        skipped_source = excel_file if copy_skipped_excel_file else archive_path
-        copied_to = copy_skipped_source(skipped_source, skip_dir, dry_run=dry_run)
-        add_log(f"[{archive_path.name}] 已跳过：{excel_file.name}，原因：{reason}")
-        add_structured_error(
-            archive_path,
-            "修改文件跳过",
-            f"{reason}；原文件名：{excel_file.name}；已复制到：{copied_to}",
-            excel_file.name,
-            status="已跳过",
-        )
+        copied_to = skip_excel_file(excel_file, reason, "修改文件跳过")
         return build_result(False, "跳过", skip=True, reason=reason, ignored=True, copied_to=copied_to)
+
+    reissue_reason = prefixed_reissue_skip_reason(excel_file.name, category_keywords)
+    if reissue_reason:
+        copied_to = skip_excel_file(excel_file, reissue_reason, "补发文件跳过")
+        return build_result(False, "跳过", skip=True, reason=reissue_reason, ignored=True, copied_to=copied_to)
 
     rows, workbook_success, category, date_text, header_report_rows = extract_rows_from_workbook(
         excel_file,

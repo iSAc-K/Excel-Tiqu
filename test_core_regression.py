@@ -18,6 +18,7 @@ SKIP_FOLDER_NAME = "\u672a\u5904\u7406\u538b\u7f29\u5305"
 MODIFY_PREFIX = "\u4fee\u6539"
 WING_IMAGE_NECKLACE = "\u7fc5\u8180\u56fe\u7247\u9879\u94fe"
 SILVER_WING_IMAGE_NECKLACE = "\u94f6\u7fc5\u8180\u56fe\u7247\u9879\u94fe"
+DOG_TAG_KEYCHAIN = "\u519b\u724c\u94a5\u5319\u6263"
 
 
 def make_order_workbook(path: Path, rows: list[tuple[str, str, object]], *, sheet_name: str = "Sheet1") -> None:
@@ -212,6 +213,31 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual(by_date["5月8日"]["订单数"], 1)
         self.assertEqual(by_date["5月8日"]["数量合计"], 4)
         self.assertEqual(by_date["5月8日"]["明细行数"], 1)
+
+    def test_reissue_before_category_is_skipped_and_copied_to_skip_folder(self) -> None:
+        workbook_path = self.input_dir / f"13-\u8865\u53d1{DOG_TAG_KEYCHAIN}.xlsx"
+        make_order_workbook(workbook_path, [("ORDER-REISSUE-SKIP", "SKU-REISSUE-SKIP", 1)])
+
+        result = self.run_tool(input_mode="folders")
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["written_rows"], 0)
+        self.assertFalse(self.output_path.exists())
+        skip_copy = self.input_dir / SKIP_FOLDER_NAME / workbook_path.name
+        self.assertTrue(skip_copy.exists())
+
+    def test_reissue_after_category_is_processed_normally(self) -> None:
+        workbook_path = self.input_dir / f"13-{DOG_TAG_KEYCHAIN}-\u8865\u53d1.xlsx"
+        make_order_workbook(workbook_path, [("ORDER-REISSUE-KEEP", "SKU-REISSUE-KEEP", 2)])
+
+        result = self.run_tool(input_mode="folders")
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["written_rows"], 1)
+        rows = read_summary_rows(self.output_path)
+        self.assertEqual(rows[0]["sheet"], DOG_TAG_KEYCHAIN)
+        self.assertEqual(rows[0]["order_id"], "ORDER-REISSUE-KEEP")
+        self.assertEqual(rows[0]["quantity"], 2)
 
     def test_same_order_empty_sku_still_merges_when_order_id_exists(self) -> None:
         workbook_path = self.work_dir / "0507-WZY-knife-1order-7pcs.xlsx"
