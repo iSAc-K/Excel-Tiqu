@@ -900,6 +900,19 @@ def prefixed_reissue_skip_reason(filename: str, category_keywords: dict[str, lis
     return ""
 
 
+def prefixed_reissue_skip_reason_for_names(
+    excel_filename: str,
+    fallback_filename: str = "",
+    category_keywords: dict[str, list[str]] | None = None,
+) -> str:
+    reason = prefixed_reissue_skip_reason(excel_filename, category_keywords)
+    if reason:
+        return reason
+    if fallback_filename and fallback_filename != excel_filename:
+        return prefixed_reissue_skip_reason(fallback_filename, category_keywords)
+    return ""
+
+
 def parse_expected_counts_from_filename(filename: str) -> tuple[int | None, int | None, str]:
     """
     从文件名中提取“预计单量”和“预计数量”。
@@ -1331,7 +1344,7 @@ def process_excel_unit(
                 copied_to = skip_excel_file(excel_file, reason, "修改文件跳过")
                 continue
 
-            reissue_reason = prefixed_reissue_skip_reason(excel_file.name, category_keywords)
+            reissue_reason = prefixed_reissue_skip_reason_for_names(excel_file.name, archive_path.name, category_keywords)
             if reissue_reason:
                 skipped_reasons.append(reissue_reason)
                 copied_to = skip_excel_file(excel_file, reissue_reason, "补发文件跳过")
@@ -1387,7 +1400,7 @@ def process_excel_unit(
         copied_to = skip_excel_file(excel_file, reason, "修改文件跳过")
         return build_result(False, "跳过", skip=True, reason=reason, ignored=True, copied_to=copied_to)
 
-    reissue_reason = prefixed_reissue_skip_reason(excel_file.name, category_keywords)
+    reissue_reason = prefixed_reissue_skip_reason_for_names(excel_file.name, archive_path.name, category_keywords)
     if reissue_reason:
         copied_to = skip_excel_file(excel_file, reissue_reason, "补发文件跳过")
         return build_result(False, "跳过", skip=True, reason=reissue_reason, ignored=True, copied_to=copied_to)

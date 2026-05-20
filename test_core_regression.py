@@ -338,6 +338,19 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual(rows[0]["date"], "12\u670816\u65e5")
         self.assertEqual(result["stats"]["category_counts"], {WING_IMAGE_NECKLACE: 1})
 
+    def test_reissue_before_category_in_archive_name_is_skipped(self) -> None:
+        workbook_path = self.work_dir / "order.xlsx"
+        archive_path = self.input_dir / f"13-\u8865\u53d1{DOG_TAG_KEYCHAIN}.zip"
+        make_order_workbook(workbook_path, [("ORDER-ARCHIVE-REISSUE-SKIP", "SKU-ARCHIVE-REISSUE-SKIP", 1)])
+        make_zip(archive_path, [(workbook_path, workbook_path.name)])
+
+        result = self.run_tool()
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["written_rows"], 0)
+        self.assertFalse(self.output_path.exists())
+        self.assertTrue((self.input_dir / SKIP_FOLDER_NAME / archive_path.name).exists())
+
     def test_folder_mode_recursively_extracts_excel_files(self) -> None:
         nested = self.input_dir / "orders" / "day-1"
         nested.mkdir(parents=True)

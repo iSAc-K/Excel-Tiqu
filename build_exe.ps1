@@ -11,7 +11,7 @@ if ([string]::IsNullOrWhiteSpace($oldPythonPath)) {
     $env:PYTHONPATH = $depsDir + ";" + $oldPythonPath
 }
 
-$appName = "Excel" + [char]0x8BA2 + [char]0x5355 + [char]0x6570 + [char]0x636E + [char]0x63D0 + [char]0x53D6 + [char]0x5DE5 + [char]0x5177 + "_v1.4"
+$appName = "Excel" + [char]0x8BA2 + [char]0x5355 + [char]0x6570 + [char]0x636E + [char]0x63D0 + [char]0x53D6 + [char]0x5DE5 + [char]0x5177 + "_v1.4.2"
 
 python -m PyInstaller --noconfirm --clean --windowed --onedir --name $appName --hidden-import extract_orders --collect-all customtkinter extract_orders_gui.py
 
