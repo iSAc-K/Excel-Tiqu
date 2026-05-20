@@ -16,6 +16,8 @@ QUANTITY_HEADER = "\u6570\u91cf"
 DATE_HEADER = "\u65e5\u671f"
 SKIP_FOLDER_NAME = "\u672a\u5904\u7406\u538b\u7f29\u5305"
 MODIFY_PREFIX = "\u4fee\u6539"
+WING_IMAGE_NECKLACE = "\u7fc5\u8180\u56fe\u7247\u9879\u94fe"
+SILVER_WING_IMAGE_NECKLACE = "\u94f6\u7fc5\u8180\u56fe\u7247\u9879\u94fe"
 
 
 def make_order_workbook(path: Path, rows: list[tuple[str, str, object]], *, sheet_name: str = "Sheet1") -> None:
@@ -59,6 +61,22 @@ def read_summary_rows(output_path: Path) -> list[dict[str, object]]:
     finally:
         workbook.close()
     return rows
+
+
+def read_report_sheet_rows(report_path: Path, sheet_name: str) -> list[dict[str, object]]:
+    workbook = load_workbook(report_path, data_only=True)
+    try:
+        worksheet = workbook[sheet_name]
+        headers = [worksheet.cell(row=1, column=col).value for col in range(1, worksheet.max_column + 1)]
+        rows: list[dict[str, object]] = []
+        for row_index in range(2, worksheet.max_row + 1):
+            values = [worksheet.cell(row=row_index, column=col).value for col in range(1, worksheet.max_column + 1)]
+            if not any(value not in (None, "") for value in values):
+                continue
+            rows.append(dict(zip(headers, values)))
+        return rows
+    finally:
+        workbook.close()
 
 
 class CoreRegressionTests(unittest.TestCase):
@@ -169,6 +187,32 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual([row["sku"] for row in rows], ["SKU-A", "SKU-B"])
         self.assertEqual([row["quantity"] for row in rows], [1, 2])
 
+    def test_daily_order_summary_counts_unique_orders_by_filename_date(self) -> None:
+        day_one_path = self.work_dir / "0507-WZY-knife-2order-6pcs.xlsx"
+        day_two_path = self.work_dir / "0508-WZY-knife-1order-4pcs.xlsx"
+        make_order_workbook(
+            day_one_path,
+            [
+                ("ORDER-DAILY-A", "SKU-A", 2),
+                ("ORDER-DAILY-A", "SKU-B", 3),
+                ("ORDER-DAILY-B", "SKU-C", 1),
+            ],
+        )
+        make_order_workbook(day_two_path, [("ORDER-DAILY-C", "SKU-D", 4)])
+        make_zip(self.input_dir / "daily.zip", [(day_one_path, day_one_path.name), (day_two_path, day_two_path.name)])
+
+        result = self.run_tool(excel_group_mode="multi")
+
+        self.assertTrue(result["success"])
+        report_rows = read_report_sheet_rows(Path(result["process_report_path"]), "每日单量汇总")
+        by_date = {row["日期"]: row for row in report_rows}
+        self.assertEqual(by_date["5月7日"]["订单数"], 2)
+        self.assertEqual(by_date["5月7日"]["数量合计"], 6)
+        self.assertEqual(by_date["5月7日"]["明细行数"], 3)
+        self.assertEqual(by_date["5月8日"]["订单数"], 1)
+        self.assertEqual(by_date["5月8日"]["数量合计"], 4)
+        self.assertEqual(by_date["5月8日"]["明细行数"], 1)
+
     def test_same_order_empty_sku_still_merges_when_order_id_exists(self) -> None:
         workbook_path = self.work_dir / "0507-WZY-knife-1order-7pcs.xlsx"
         make_order_workbook(
@@ -251,6 +295,23 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual([row["order_id"] for row in rows], ["ORDER-SUB-1", "ORDER-SUB-2"])
         self.assertTrue(Path(result["process_report_path"]).exists())
 
+    def test_archive_name_is_used_when_excel_filename_has_no_category_or_date(self) -> None:
+        workbook_path = self.work_dir / "order.xlsx"
+        make_order_workbook(workbook_path, [("ORDER-ARCHIVE-FALLBACK", "SKU-WING", 10)])
+        make_zip(
+            self.input_dir / f"13-1216-HC-{SILVER_WING_IMAGE_NECKLACE}-9\u5355-10\u4ef6.zip",
+            [(workbook_path, workbook_path.name)],
+        )
+
+        result = self.run_tool()
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["written_rows"], 1)
+        rows = read_summary_rows(self.output_path)
+        self.assertEqual(rows[0]["sheet"], WING_IMAGE_NECKLACE)
+        self.assertEqual(rows[0]["date"], "12\u670816\u65e5")
+        self.assertEqual(result["stats"]["category_counts"], {WING_IMAGE_NECKLACE: 1})
+
     def test_folder_mode_recursively_extracts_excel_files(self) -> None:
         nested = self.input_dir / "orders" / "day-1"
         nested.mkdir(parents=True)
@@ -264,6 +325,21 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual(result["written_rows"], 1)
         rows = read_summary_rows(self.output_path)
         self.assertEqual(rows[0]["order_id"], "ORDER-FOLDER")
+
+    def test_folder_name_is_used_when_excel_filename_has_no_category_or_date(self) -> None:
+        folder = self.input_dir / f"13-1216-HC-{SILVER_WING_IMAGE_NECKLACE}-9\u5355-10\u4ef6"
+        folder.mkdir()
+        workbook_path = folder / "order.xlsx"
+        make_order_workbook(workbook_path, [("ORDER-FOLDER-FALLBACK", "SKU-WING", 10)])
+
+        result = self.run_tool(input_mode="folders")
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["written_rows"], 1)
+        rows = read_summary_rows(self.output_path)
+        self.assertEqual(rows[0]["sheet"], WING_IMAGE_NECKLACE)
+        self.assertEqual(rows[0]["date"], "12\u670816\u65e5")
+        self.assertEqual(result["stats"]["category_counts"], {WING_IMAGE_NECKLACE: 1})
 
     def test_folder_mode_copies_modify_excel_file_to_skip_folder(self) -> None:
         workbook_path = self.input_dir / f"{MODIFY_PREFIX}-0507-WZY-knife-1order-1pc.xlsx"

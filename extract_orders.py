@@ -95,7 +95,7 @@ DEFAULT_CATEGORY_KEYWORDS = {
     "方黑名片架": ["方黑名片架"],
     "雕刻手链": ["雕刻手链"],
     "NP图片项链": ["NP图片项链", "诺派旋转图片项链"],
-    "翅膀图片项链": ["银翅膀图片项链", "金翅膀图片项链", "翅膀项链"],
+    "翅膀图片项链": ["银翅膀图片项链", "金翅膀图片项链", "翅膀项链", "热转印-图片项链"],
     "双面钥匙扣": ["双图热转钥匙扣", "双面爱心钥匙扣", "双面圆形钥匙扣", "双面心形钥匙扣"],
     "旋转钥匙扣": ["旋转钥匙扣"],
     "心形刻字钥匙扣": ["心形刻字钥匙扣"],
@@ -1034,17 +1034,28 @@ def normalize_quantity(value: Any, excel_name: str, row_index: int) -> Any:
 def extract_rows_from_workbook(
     file_path: Path,
     category_keywords: dict[str, list[str]] | None = None,
+    fallback_filename: str = "",
 ) -> tuple[list[dict[str, Any]], bool, str, str, list[dict[str, Any]]]:
     """
     从单个 Excel 文件中提取数据。
     """
     date_text = parse_date_from_filename(file_path.name)
+    if not date_text and fallback_filename and fallback_filename != file_path.name:
+        fallback_date = parse_date_from_filename(fallback_filename)
+        if fallback_date:
+            add_log(f"Excel 文件名未识别到日期，改用外层名称识别：{fallback_filename}")
+            date_text = fallback_date
     if date_text:
         add_log(f"识别日期：{date_text}")
     else:
         add_log(f"未识别到日期：{file_path.name}，日期列留空")
 
     category = detect_category_from_filename(file_path.name, category_keywords)
+    if category == "未分类" and fallback_filename and fallback_filename != file_path.name:
+        fallback_category = detect_category_from_filename(fallback_filename, category_keywords)
+        if fallback_category != "未分类":
+            add_log(f"Excel 文件名未命中品类，改用外层名称识别：{fallback_filename}")
+            category = fallback_category
     add_log(f"识别品类：{category}")
 
     try:
@@ -1293,6 +1304,7 @@ def process_excel_unit(
             extracted_rows, workbook_success, current_category, current_date_text, current_header_rows = extract_rows_from_workbook(
                 excel_file,
                 category_keywords,
+                archive_path.name,
             )
             for row in current_header_rows:
                 row["压缩包名"] = archive_path.name
@@ -1349,6 +1361,7 @@ def process_excel_unit(
     rows, workbook_success, category, date_text, header_report_rows = extract_rows_from_workbook(
         excel_file,
         category_keywords,
+        archive_path.name,
     )
     for row in header_report_rows:
         row["压缩包名"] = archive_path.name
@@ -2505,6 +2518,39 @@ def build_category_summary_rows(rows: list[dict[str, Any]]) -> list[dict[str, An
     return output_rows
 
 
+def build_daily_order_summary_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    summary: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        date_text = str(row.get("日期") or "未识别日期")
+        item = summary.setdefault(
+            date_text,
+            {"日期": date_text, "明细行数": 0, "订单号": set(), "数量合计": 0.0, "品类": set()},
+        )
+        item["明细行数"] += 1
+        order_id = row_order_id(row)
+        if order_id:
+            item["订单号"].add(order_id)
+        category = str(row.get("category") or "")
+        if category:
+            item["品类"].add(category)
+        number = quantity_to_number(row.get("数量"))
+        if number is not None:
+            item["数量合计"] += number
+
+    output_rows = []
+    for item in summary.values():
+        output_rows.append(
+            {
+                "日期": item["日期"],
+                "订单数": len(item["订单号"]),
+                "数量合计": format_quantity_total(float(item["数量合计"])),
+                "明细行数": item["明细行数"],
+                "涉及品类": "、".join(sorted(item["品类"])),
+            }
+        )
+    return output_rows
+
+
 def highlight_report_rows(ws, headers: list[str], yellow_columns: set[str], red_columns: set[str]) -> None:
     yellow_fill = PatternFill(fill_type="solid", fgColor="FFF2CC")
     red_fill = PatternFill(fill_type="solid", fgColor="F4CCCC")
@@ -2638,6 +2684,11 @@ def save_process_report(report_data: dict[str, Any], report_dir: str | Path | No
             "品类汇总",
             ["品类", "写入行数", "订单数", "数量合计", "涉及压缩包数量"],
             build_category_summary_rows(report_data.get("rows_to_write") or []),
+        ),
+        (
+            "每日单量汇总",
+            ["日期", "订单数", "数量合计", "明细行数", "涉及品类"],
+            build_daily_order_summary_rows(report_data.get("rows_to_write") or []),
         ),
     ]
 
