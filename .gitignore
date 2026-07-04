@@ -5,6 +5,7 @@ __pycache__/
 # Local dependency/cache folders
 .codex_test_deps/
 .pytest_cache/
+.worktrees/
 
 # Build and packaged artifacts
 build/
