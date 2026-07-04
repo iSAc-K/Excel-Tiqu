@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import tempfile
 import unittest
@@ -90,6 +91,7 @@ class CoreRegressionTests(unittest.TestCase):
         self.logs_dir = self.base / "logs"
         self.backups_dir = self.base / "backups"
         self.output_path = self.base / "summary.xlsx"
+        self.category_config_path = self.base / "category_config.json"
 
     def tearDown(self) -> None:
         shutil.rmtree(self.base, ignore_errors=True)
@@ -129,6 +131,69 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertTrue(zip_path.exists())
         with zipfile.ZipFile(zip_path) as archive:
             self.assertEqual(archive.namelist(), [workbook_path.name])
+
+    def test_load_old_category_config_returns_empty_prefixes(self) -> None:
+        self.category_config_path.write_text(
+            json.dumps({"方黑名片架": ["方黑名片架"]}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        from extract_orders import load_category_config_data
+
+        config_data, path, error = load_category_config_data(self.category_config_path)
+
+        self.assertEqual(error, "")
+        self.assertEqual(Path(path), self.category_config_path)
+        self.assertEqual(config_data.categories, {"方黑名片架": ["方黑名片架"]})
+        self.assertEqual(config_data.prefixes, [])
+
+    def test_load_old_category_config_allows_prefixes_category_name(self) -> None:
+        self.category_config_path.write_text(
+            json.dumps({"prefixes": ["prefix keyword"]}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        from extract_orders import load_category_config_data
+
+        config_data, _, error = load_category_config_data(self.category_config_path)
+
+        self.assertEqual(error, "")
+        self.assertEqual(config_data.categories, {"prefixes": ["prefix keyword"]})
+        self.assertEqual(config_data.prefixes, [])
+
+    def test_load_old_category_config_allows_categories_category_name(self) -> None:
+        self.category_config_path.write_text(
+            json.dumps({"categories": ["category keyword"]}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        from extract_orders import load_category_config_data
+
+        config_data, _, error = load_category_config_data(self.category_config_path)
+
+        self.assertEqual(error, "")
+        self.assertEqual(config_data.categories, {"categories": ["category keyword"]})
+        self.assertEqual(config_data.prefixes, [])
+
+    def test_load_structured_category_config_reads_prefixes(self) -> None:
+        self.category_config_path.write_text(
+            json.dumps(
+                {
+                    "prefixes": ["WZY", "HAL"],
+                    "categories": {"纯木名片架": ["纯木名片架"]},
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        from extract_orders import load_category_config_data
+
+        config_data, _, error = load_category_config_data(self.category_config_path)
+
+        self.assertEqual(error, "")
+        self.assertEqual(config_data.prefixes, ["WZY", "HAL"])
+        self.assertEqual(config_data.categories, {"纯木名片架": ["纯木名片架"]})
 
     def test_dry_run_scans_and_reports_without_writing_output_or_backup(self) -> None:
         workbook_path = self.work_dir / "0507-WZY-knife-1order-2pcs.xlsx"

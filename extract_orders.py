@@ -11,6 +11,7 @@ import tempfile
 import threading
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -148,6 +149,22 @@ def copy_default_category_keywords() -> dict[str, list[str]]:
     return {category: list(keywords) for category, keywords in DEFAULT_CATEGORY_KEYWORDS.items()}
 
 
+@dataclass
+class CategoryConfigData:
+    categories: dict[str, list[str]]
+    prefixes: list[str]
+
+    def copy(self) -> "CategoryConfigData":
+        return CategoryConfigData(
+            categories={category: list(keywords) for category, keywords in self.categories.items()},
+            prefixes=list(self.prefixes),
+        )
+
+
+def copy_default_category_config_data() -> CategoryConfigData:
+    return CategoryConfigData(copy_default_category_keywords(), [])
+
+
 def validate_category_config(data: Any) -> dict[str, list[str]]:
     if not isinstance(data, dict):
         raise ValueError("配置文件根节点必须是对象")
@@ -171,6 +188,31 @@ def validate_category_config(data: Any) -> dict[str, list[str]]:
     return config
 
 
+def validate_prefixes(data: Any) -> list[str]:
+    if data is None:
+        return []
+    if not isinstance(data, list):
+        raise ValueError("prefixes 必须是列表")
+    prefixes: list[str] = []
+    seen: set[str] = set()
+    for item in data:
+        prefix = str(item).strip()
+        if prefix and prefix not in seen:
+            prefixes.append(prefix)
+            seen.add(prefix)
+    return prefixes
+
+
+def validate_category_config_data(data: Any) -> CategoryConfigData:
+    if not isinstance(data, dict):
+        raise ValueError("配置文件根节点必须是对象")
+    if isinstance(data.get("categories"), dict):
+        categories = validate_category_config(data.get("categories", {}))
+        prefixes = validate_prefixes(data.get("prefixes", []))
+        return CategoryConfigData(categories=categories, prefixes=prefixes)
+    return CategoryConfigData(categories=validate_category_config(data), prefixes=[])
+
+
 def save_category_config(config: dict[str, list[str]], config_path: str | Path | None = None) -> Path:
     path = Path(config_path).expanduser() if config_path else default_category_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -186,25 +228,50 @@ def ensure_default_category_config(config_path: str | Path | None = None) -> Pat
     return path
 
 
-def load_category_config(
+def save_category_config_data(config_data: CategoryConfigData, config_path: str | Path | None = None) -> Path:
+    path = Path(config_path).expanduser() if config_path else default_category_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    validated = validate_category_config_data(
+        {
+            "categories": config_data.categories,
+            "prefixes": config_data.prefixes,
+        }
+    )
+    payload = {
+        "prefixes": validated.prefixes,
+        "categories": validated.categories,
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def load_category_config_data(
     config_path: str | Path | None = None,
     create_if_missing: bool = False,
-) -> tuple[dict[str, list[str]], str, str]:
+) -> tuple[CategoryConfigData, str, str]:
     path = Path(config_path).expanduser() if config_path else default_category_config_path()
     if create_if_missing and not path.exists():
         try:
             save_category_config(copy_default_category_keywords(), path)
         except Exception as exc:
-            return copy_default_category_keywords(), str(path), f"创建品类配置失败：{exc}"
+            return copy_default_category_config_data(), str(path), f"创建品类配置失败：{exc}"
 
     if not path.exists():
-        return copy_default_category_keywords(), str(path), "品类配置文件不存在，已使用内置默认配置"
+        return copy_default_category_config_data(), str(path), "品类配置文件不存在，已使用内置默认配置"
 
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return validate_category_config(data), str(path), ""
+        return validate_category_config_data(data), str(path), ""
     except Exception as exc:
-        return copy_default_category_keywords(), str(path), f"品类配置文件读取失败：{exc}，已使用内置默认配置"
+        return copy_default_category_config_data(), str(path), f"品类配置文件读取失败：{exc}，已使用内置默认配置"
+
+
+def load_category_config(
+    config_path: str | Path | None = None,
+    create_if_missing: bool = False,
+) -> tuple[dict[str, list[str]], str, str]:
+    config_data, path, error = load_category_config_data(config_path, create_if_missing)
+    return config_data.categories, path, error
 
 
 def set_log_callback(log_callback: Callable[[str], None] | None) -> None:
