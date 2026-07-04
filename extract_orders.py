@@ -1011,6 +1011,14 @@ def build_category_candidate_from_name(name: str, prefixes: list[str] | None = N
     }
 
 
+def first_category_candidate_from_names(names: list[str], prefixes: list[str] | None = None) -> dict[str, str] | None:
+    for name in names:
+        candidate = build_category_candidate_from_name(name, prefixes or [])
+        if candidate:
+            return candidate
+    return None
+
+
 def prefixed_reissue_skip_reason(filename: str, category_keywords: dict[str, list[str]] | None = None) -> str:
     stem = Path(filename).stem
     reissue_index = stem.find("补发")
@@ -1207,7 +1215,8 @@ def extract_rows_from_workbook(
     file_path: Path,
     category_keywords: dict[str, list[str]] | None = None,
     fallback_filename: str = "",
-) -> tuple[list[dict[str, Any]], bool, str, str, list[dict[str, Any]]]:
+    category_prefixes: list[str] | None = None,
+) -> tuple[list[dict[str, Any]], bool, str, str, list[dict[str, Any]], dict[str, str] | None]:
     """
     从单个 Excel 文件中提取数据。
     """
@@ -1229,13 +1238,21 @@ def extract_rows_from_workbook(
             add_log(f"Excel 文件名未命中品类，改用外层名称识别：{fallback_filename}")
             category = fallback_category
     add_log(f"识别品类：{category}")
+    category_candidate = None
+    if category == "未分类":
+        candidate_names = [fallback_filename, file_path.name] if fallback_filename and fallback_filename != file_path.name else [file_path.name]
+        category_candidate = first_category_candidate_from_names(candidate_names, category_prefixes or [])
+        if category_candidate and not any(not char.isascii() for char in category_candidate.get("category", "")):
+            category_candidate = None
+        if category_candidate:
+            add_log(f"发现待确认品类候选：{category_candidate.get('category', '')}（来源：{category_candidate.get('source_name', '')}）")
 
     try:
         workbook = load_workbook(file_path, data_only=True, read_only=False)
     except Exception as exc:
         add_exception(f"异常：打开 Excel 失败 {file_path.name}，原因：{exc}")
         add_structured_error(None, "打开Excel失败", f"打开 Excel 失败 {file_path.name}，原因：{exc}", file_path.name)
-        return [], False, category, date_text, []
+        return [], False, category, date_text, [], category_candidate
 
     rows: list[dict[str, Any]] = []
     header_report_rows: list[dict[str, Any]] = []
@@ -1352,14 +1369,14 @@ def extract_rows_from_workbook(
             for entry in sheet_debug_entries:
                 add_debug_log(format_sheet_debug_log(**entry, fail_reason=fail_reason))
             add_log(f"未提取到有效数据：{file_path.name}")
-            return [], True, category, date_text, header_report_rows
+            return [], True, category, date_text, header_report_rows, category_candidate
         fail_reason = "未识别到任何核心表头"
         for entry in sheet_debug_entries:
             add_debug_log(format_sheet_debug_log(**entry, fail_reason=fail_reason))
         related = f"{file_path.name} / " + "；".join(nonempty_sheets_without_headers)
         add_exception(f"异常：{file_path.name} 未识别到任何核心表头，已跳过")
         add_structured_error(None, "未识别到任何核心表头", "未识别到任何核心表头：亚马逊订单号 / SKU / 数量", related)
-        return [], False, category, date_text, header_report_rows
+        return [], False, category, date_text, header_report_rows, category_candidate
 
     if nonempty_sheets_without_headers:
         fail_reason = "部分 Sheet 未识别到任何核心表头"
@@ -1370,7 +1387,7 @@ def extract_rows_from_workbook(
     for entry in sheet_debug_entries:
         add_debug_log(format_sheet_debug_log(**entry, fail_reason=fail_reason))
     add_log(f"提取数据：{len(rows)} 行")
-    return rows, True, category, date_text, header_report_rows
+    return rows, True, category, date_text, header_report_rows, category_candidate
 
 
 def process_excel_unit(
@@ -1379,7 +1396,9 @@ def process_excel_unit(
     excel_files: list[Path],
     unit_folder: Path,
     category_keywords: dict[str, list[str]] | None = None,
+    category_prefixes: list[str] | None = None,
     skip_dir: Path | None = None,
+    unclassified_dir: Path | None = None,
     dry_run: bool = False,
     excel_group_mode: str = EXCEL_GROUP_SINGLE,
     copy_skipped_excel_file: bool = False,
@@ -1388,6 +1407,7 @@ def process_excel_unit(
     quantity_error_rows: list[dict[str, Any]] = []
     header_report_rows: list[dict[str, Any]] = []
     filename_validations: list[dict[str, Any]] = []
+    category_candidates: list[dict[str, str]] = []
     excel_count = len(excel_files)
     selected_excel_name = "；".join(str(file.relative_to(extracted_root)) for file in excel_files)
     category = ""
@@ -1437,8 +1457,26 @@ def process_excel_unit(
             "filename_validations": list(filename_validations),
             "quantity_error_rows": list(quantity_error_rows),
             "header_report_rows": list(header_report_rows),
+            "category_candidates": list(category_candidates),
             "ignored": ignored,
         }
+
+    def record_category_candidate(candidate: dict[str, str] | None, excel_file: Path) -> None:
+        if not candidate:
+            return
+        enriched = dict(candidate)
+        enriched.update(
+            {
+                "status": "待确认",
+                "archive_name": archive_path.name,
+                "excel_file": excel_file.name,
+                "source_path": str(excel_file),
+            }
+        )
+        category_candidates.append(enriched)
+        copied_to = copy_skipped_source(excel_file, unclassified_dir, dry_run=dry_run)
+        if copied_to:
+            add_log(f"[{archive_path.name}] 未分类 Excel 已复制到：{copied_to}")
 
     def skip_excel_file(excel_file: Path, reason: str, skip_type: str) -> str:
         skipped_source = excel_file if copy_skipped_excel_file else archive_path
@@ -1485,11 +1523,13 @@ def process_excel_unit(
                 copied_to = skip_excel_file(excel_file, reissue_reason, "补发文件跳过")
                 continue
 
-            extracted_rows, workbook_success, current_category, current_date_text, current_header_rows = extract_rows_from_workbook(
+            extracted_rows, workbook_success, current_category, current_date_text, current_header_rows, current_category_candidate = extract_rows_from_workbook(
                 excel_file,
                 category_keywords,
                 archive_path.name,
+                category_prefixes,
             )
+            record_category_candidate(current_category_candidate, excel_file)
             for row in current_header_rows:
                 row["压缩包名"] = archive_path.name
                 row["子文件夹名"] = subfolder_name
@@ -1540,11 +1580,13 @@ def process_excel_unit(
         copied_to = skip_excel_file(excel_file, reissue_reason, "补发文件跳过")
         return build_result(False, "跳过", skip=True, reason=reissue_reason, ignored=True, copied_to=copied_to)
 
-    rows, workbook_success, category, date_text, header_report_rows = extract_rows_from_workbook(
+    rows, workbook_success, category, date_text, header_report_rows, category_candidate = extract_rows_from_workbook(
         excel_file,
         category_keywords,
         archive_path.name,
+        category_prefixes,
     )
+    record_category_candidate(category_candidate, excel_file)
     for row in header_report_rows:
         row["压缩包名"] = archive_path.name
         row["子文件夹名"] = subfolder_name
@@ -1571,7 +1613,9 @@ def process_excel_unit(
 def process_archive(
     archive_path: Path,
     category_keywords: dict[str, list[str]] | None = None,
+    category_prefixes: list[str] | None = None,
     skip_dir: Path | None = None,
+    unclassified_dir: Path | None = None,
     hc_dir: Path | None = None,
     dry_run: bool = False,
     enable_hc_filter: bool = False,
@@ -1603,6 +1647,7 @@ def process_archive(
     quantity_error_rows: list[dict[str, Any]] = []
     header_report_rows: list[dict[str, Any]] = []
     hc_report_rows: list[dict[str, Any]] = []
+    category_candidates: list[dict[str, str]] = []
     ignored_units = 0
     success_units = 0
 
@@ -1639,6 +1684,7 @@ def process_archive(
             "quantity_error_rows": list(quantity_error_rows),
             "header_report_rows": list(header_report_rows),
             "hc_report_rows": list(hc_report_rows),
+            "category_candidates": list(category_candidates),
             "ignored": ignored,
         }
 
@@ -1716,7 +1762,9 @@ def process_archive(
                     unit_excel_files,
                     unit_folder,
                     category_keywords,
+                    category_prefixes,
                     skip_dir,
+                    unclassified_dir,
                     dry_run,
                     excel_group_mode=excel_group_mode,
                 )
@@ -1729,6 +1777,7 @@ def process_archive(
                     filename_validations.append(unit_result["filename_validation"])
                 quantity_error_rows.extend(unit_result.get("quantity_error_rows") or [])
                 header_report_rows.extend(unit_result.get("header_report_rows") or [])
+                category_candidates.extend(unit_result.get("category_candidates") or [])
                 if unit_result.get("ignored"):
                     ignored_units += 1
                 elif unit_result.get("success"):
@@ -1757,7 +1806,9 @@ def process_folder_excel_group(
     unit_folder: Path,
     excel_files: list[Path],
     category_keywords: dict[str, list[str]] | None = None,
+    category_prefixes: list[str] | None = None,
     skip_dir: Path | None = None,
+    unclassified_dir: Path | None = None,
     hc_dir: Path | None = None,
     dry_run: bool = False,
     enable_hc_filter: bool = False,
@@ -1793,6 +1844,7 @@ def process_folder_excel_group(
             "quantity_error_rows": list(result.get("quantity_error_rows") or []),
             "header_report_rows": list(result.get("header_report_rows") or []),
             "hc_report_rows": list(hc_report_rows),
+            "category_candidates": list(result.get("category_candidates") or []),
             "ignored": ignored or bool(result.get("ignored")),
         }
 
@@ -1818,7 +1870,9 @@ def process_folder_excel_group(
             normal_excel_files,
             unit_folder,
             category_keywords,
+            category_prefixes,
             skip_dir,
+            unclassified_dir,
             dry_run,
             excel_group_mode=excel_group_mode,
             copy_skipped_excel_file=True,
@@ -2500,6 +2554,12 @@ def build_skip_dir(input_path: str | Path) -> Path:
     return base / "未处理压缩包"
 
 
+def build_unclassified_dir(input_path: str | Path) -> Path:
+    path = Path(input_path).expanduser()
+    base = path if path.is_dir() else path.parent
+    return base / "未分类Excel"
+
+
 def build_hc_dir(input_path: str | Path) -> Path:
     path = Path(input_path).expanduser()
     base = path if path.is_dir() else path.parent
@@ -2935,6 +2995,7 @@ def run_extract(
     normalized_excel_group_mode = normalize_excel_group_mode(excel_group_mode)
     logs_dir = Path(report_dir).expanduser() if report_dir else get_runtime_base_dir() / "logs"
     skip_dir = build_skip_dir(input_path)
+    unclassified_dir = build_unclassified_dir(input_path)
     hc_dir = build_hc_dir(input_path)
     all_rows: list[dict[str, Any]] = []
     merged_rows: list[dict[str, Any]] = []
@@ -2947,6 +3008,7 @@ def run_extract(
     merge_quantity_error_rows: list[dict[str, Any]] = []
     header_report_rows: list[dict[str, Any]] = []
     hc_report_rows: list[dict[str, Any]] = []
+    category_candidates: list[dict[str, str]] = []
     archive_results_by_index: dict[int, dict[str, Any]] = {}
     stats = make_empty_stats(dry_run=dry_run)
     stats["workers"] = normalized_workers
@@ -2960,7 +3022,9 @@ def run_extract(
     no_writable_data = False
     success = False
 
-    category_keywords, category_config_file_path, category_config_error = load_category_config(category_config_path)
+    category_config_data, category_config_file_path, category_config_error = load_category_config_data(category_config_path)
+    category_keywords = category_config_data.categories
+    category_prefixes = category_config_data.prefixes
     if category_config_error:
         add_log(f"警告：{category_config_error}")
     else:
@@ -3017,7 +3081,9 @@ def run_extract(
                         process_archive,
                         archive_path,
                         category_keywords,
+                        category_prefixes,
                         skip_dir,
+                        unclassified_dir,
                         hc_dir,
                         dry_run,
                         enable_hc_filter,
@@ -3043,7 +3109,9 @@ def run_extract(
                         unit_folder,
                         unit_files,
                         category_keywords,
+                        category_prefixes,
                         skip_dir,
+                        unclassified_dir,
                         hc_dir,
                         dry_run,
                         enable_hc_filter,
@@ -3095,6 +3163,7 @@ def run_extract(
                             "quantity_error_rows": [],
                             "header_report_rows": [],
                             "hc_report_rows": [],
+                            "category_candidates": [],
                         }
                     if not result.get("ignored") and not result.get("success"):
                         failed_count += 1
@@ -3131,6 +3200,7 @@ def run_extract(
                 quantity_error_rows.extend(result.get("quantity_error_rows") or [])
                 header_report_rows.extend(result.get("header_report_rows") or [])
                 hc_report_rows.extend(result.get("hc_report_rows") or [])
+                category_candidates.extend(result.get("category_candidates") or [])
                 rows = list(result.get("rows") or [])
                 all_rows.extend(rows)
                 if result.get("ignored"):
@@ -3146,9 +3216,17 @@ def run_extract(
             stats["hc_file_count"] = len(hc_report_rows)
             stats["hc_copy_failed_count"] = sum(1 for row in hc_report_rows if row.get("处理状态") == "复制失败，已排除")
             stats["category_counts"] = build_category_counts(all_rows)
-            merged_rows, merge_quantity_error_rows = consolidate_order_sku_rows(all_rows)
-            if len(merged_rows) != len(all_rows):
-                add_log(f"同一订单号下相同 SKU 已合并：{len(all_rows)} 行 -> {len(merged_rows)} 行")
+            candidate_row_keys = {
+                (candidate.get("archive_name", ""), candidate.get("excel_file", ""))
+                for candidate in category_candidates
+            }
+            writable_source_rows = [
+                row for row in all_rows
+                if (str(row.get("压缩包名") or ""), str(row.get("Excel 文件名") or "")) not in candidate_row_keys
+            ]
+            merged_rows, merge_quantity_error_rows = consolidate_order_sku_rows(writable_source_rows)
+            if len(merged_rows) != len(writable_source_rows):
+                add_log(f"同一订单号下相同 SKU 已合并：{len(writable_source_rows)} 行 -> {len(merged_rows)} 行")
             quantity_error_rows.extend(merge_quantity_error_rows)
             quantity_error_rows = dedupe_quantity_error_rows(quantity_error_rows)
             rows_to_write, duplicate_report_rows, exact_duplicate_report_rows = detect_duplicates(
@@ -3210,6 +3288,7 @@ def run_extract(
             "quantity_error_rows": list(quantity_error_rows),
             "header_report_rows": list(header_report_rows),
             "hc_report_rows": list(hc_report_rows),
+            "category_candidates": list(category_candidates),
             "duplicate_report_rows": list(duplicate_report_rows),
             "exact_duplicate_report_rows": list(exact_duplicate_report_rows),
             "rows_to_write": list(rows_to_write),
@@ -3248,6 +3327,7 @@ def run_extract(
         "filename_validations": list(filename_validations),
         "header_report_rows": list(header_report_rows),
         "hc_report_rows": list(hc_report_rows),
+        "category_candidates": list(category_candidates),
         "duplicate_report_rows": list(duplicate_report_rows),
         "exact_duplicate_report_rows": list(exact_duplicate_report_rows),
         "duplicate_report_file_path": duplicate_report_file_path,

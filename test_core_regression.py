@@ -16,6 +16,7 @@ ORDER_HEADER = "\u4e9a\u9a6c\u900a\u8ba2\u5355\u53f7"
 QUANTITY_HEADER = "\u6570\u91cf"
 DATE_HEADER = "\u65e5\u671f"
 SKIP_FOLDER_NAME = "\u672a\u5904\u7406\u538b\u7f29\u5305"
+UNCLASSIFIED_FOLDER_NAME = "\u672a\u5206\u7c7bExcel"
 MODIFY_PREFIX = "\u4fee\u6539"
 WING_IMAGE_NECKLACE = "\u7fc5\u8180\u56fe\u7247\u9879\u94fe"
 SILVER_WING_IMAGE_NECKLACE = "\u94f6\u7fc5\u8180\u56fe\u7247\u9879\u94fe"
@@ -483,6 +484,26 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual(result["written_rows"], 1)
         rows = read_summary_rows(self.output_path)
         self.assertEqual(rows[0]["order_id"], "ORDER-FOLDER")
+
+    def test_unclassified_folder_excel_records_category_candidate(self) -> None:
+        folder = self.input_dir / "0607" / "1~2-0605-\u65b9\u767d\u540d\u7247\u67b6-1\u5355-1\u4e2a"
+        folder.mkdir(parents=True)
+        workbook_path = folder / "random-order.xlsx"
+        make_order_workbook(workbook_path, [("ORDER-UNCLASSIFIED", "SKU-UNKNOWN", 1)])
+
+        result = self.run_tool(input_mode="folders")
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["total_rows"], 1)
+        self.assertEqual(result["written_rows"], 0)
+        self.assertFalse(self.output_path.exists())
+        self.assertTrue((self.input_dir / UNCLASSIFIED_FOLDER_NAME / workbook_path.name).exists())
+        candidates = result["category_candidates"]
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["source_name"], "1~2-0605-\u65b9\u767d\u540d\u7247\u67b6-1\u5355-1\u4e2a")
+        self.assertEqual(candidates[0]["raw_candidate"], "\u65b9\u767d\u540d\u7247\u67b6")
+        self.assertEqual(candidates[0]["category"], "\u65b9\u767d\u540d\u7247\u67b6")
+        self.assertEqual(candidates[0]["status"], "\u5f85\u786e\u8ba4")
 
     def test_folder_name_is_used_when_excel_filename_has_no_category_or_date(self) -> None:
         folder = self.input_dir / f"13-1216-HC-{SILVER_WING_IMAGE_NECKLACE}-9\u5355-10\u4ef6"
