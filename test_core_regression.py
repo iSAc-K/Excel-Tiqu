@@ -225,6 +225,23 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual(candidate["prefix"], "HAL")
         self.assertEqual(candidate["category"], "小钢片")
 
+    def test_extract_category_candidate_keeps_extensionless_dot_date_folder_name(self) -> None:
+        from extract_orders import build_category_candidate_from_name
+
+        candidate = build_category_candidate_from_name("33~35-4.18-方黑名片架-20单-3个", [])
+
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate["category"], "方黑名片架")
+
+    def test_extract_category_candidate_does_not_strip_attached_ascii_prefix_extension(self) -> None:
+        from extract_orders import build_category_candidate_from_name
+
+        candidate = build_category_candidate_from_name("17-0625-WZYX小钢片-4单5个", ["WZY"])
+
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate["prefix"], "")
+        self.assertEqual(candidate["category"], "WZYX小钢片")
+
     def test_extract_category_candidate_ignores_structure_only_name(self) -> None:
         from extract_orders import build_category_candidate_from_name
 

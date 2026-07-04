@@ -943,8 +943,15 @@ def detect_category_from_filename(filename: str, category_keywords: dict[str, li
     return selected[2]
 
 
+def strip_known_source_suffix(name: str) -> str:
+    path = Path(str(name))
+    if path.suffix.lower() in {".xlsx", ".xlsm", ".xls", ".zip", ".rar", ".7z"}:
+        return path.with_suffix("").name
+    return path.name
+
+
 def split_candidate_name_parts(name: str) -> list[str]:
-    stem = Path(str(name)).stem
+    stem = strip_known_source_suffix(name)
     normalized = re.sub(r"[＿_]+", "-", stem)
     normalized = re.sub(r"\s+", "", normalized)
     return [part.strip(" -—–~") for part in re.split(r"[-—–]+", normalized) if part.strip(" -—–~")]
@@ -978,7 +985,8 @@ def clean_candidate_with_prefix(raw_candidate: str, prefixes: list[str]) -> tupl
         if candidate.startswith(separated):
             cleaned = candidate[len(separated):].strip(" -—–")
             return prefix, cleaned
-        if candidate.startswith(prefix) and len(candidate) > len(prefix):
+        next_char = candidate[len(prefix):len(prefix) + 1]
+        if candidate.startswith(prefix) and next_char and not next_char.isascii():
             cleaned = candidate[len(prefix):].strip(" -—–")
             return prefix, cleaned
     return "", candidate
