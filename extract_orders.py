@@ -943,6 +943,66 @@ def detect_category_from_filename(filename: str, category_keywords: dict[str, li
     return selected[2]
 
 
+def split_candidate_name_parts(name: str) -> list[str]:
+    stem = Path(str(name)).stem
+    normalized = re.sub(r"[＿_]+", "-", stem)
+    normalized = re.sub(r"\s+", "", normalized)
+    return [part.strip(" -—–~") for part in re.split(r"[-—–]+", normalized) if part.strip(" -—–~")]
+
+
+def is_sequence_part(part: str) -> bool:
+    return bool(re.fullmatch(r"\d{1,3}(?:[~～]\d{1,3})?", part))
+
+
+def is_date_part(part: str) -> bool:
+    if parse_date_from_filename(part):
+        return True
+    return bool(re.fullmatch(r"\d{1,2}[.月]\d{1,2}(?:日)?", part))
+
+
+def is_quantity_part(part: str) -> bool:
+    return bool(re.fullmatch(r".*\d+\s*(?:单|个|件|pcs?|orders?|qty).*", part, flags=re.IGNORECASE))
+
+
+def is_candidate_noise_part(part: str) -> bool:
+    text = part.strip()
+    if not text:
+        return True
+    return is_sequence_part(text) or is_date_part(text) or is_quantity_part(text)
+
+
+def clean_candidate_with_prefix(raw_candidate: str, prefixes: list[str]) -> tuple[str, str]:
+    candidate = raw_candidate.strip(" -—–")
+    for prefix in sorted((item.strip() for item in prefixes if item.strip()), key=len, reverse=True):
+        separated = f"{prefix}-"
+        if candidate.startswith(separated):
+            cleaned = candidate[len(separated):].strip(" -—–")
+            return prefix, cleaned
+        if candidate.startswith(prefix) and len(candidate) > len(prefix):
+            cleaned = candidate[len(prefix):].strip(" -—–")
+            return prefix, cleaned
+    return "", candidate
+
+
+def build_category_candidate_from_name(name: str, prefixes: list[str] | None = None) -> dict[str, str] | None:
+    parts = split_candidate_name_parts(name)
+    kept = [part for part in parts if not is_candidate_noise_part(part)]
+    if not kept:
+        return None
+    raw_candidate = "-".join(kept).strip(" -—–")
+    if not raw_candidate or not re.search(r"[^\d\s~～.\-—–]", raw_candidate):
+        return None
+    prefix, category = clean_candidate_with_prefix(raw_candidate, prefixes or [])
+    if not category:
+        return None
+    return {
+        "source_name": str(name),
+        "raw_candidate": raw_candidate,
+        "prefix": prefix,
+        "category": category,
+    }
+
+
 def prefixed_reissue_skip_reason(filename: str, category_keywords: dict[str, list[str]] | None = None) -> str:
     stem = Path(filename).stem
     reissue_index = stem.find("补发")

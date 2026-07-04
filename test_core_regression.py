@@ -195,6 +195,43 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual(config_data.prefixes, ["WZY", "HAL"])
         self.assertEqual(config_data.categories, {"纯木名片架": ["纯木名片架"]})
 
+    def test_extract_category_candidate_from_folder_name(self) -> None:
+        from extract_orders import build_category_candidate_from_name
+
+        candidate = build_category_candidate_from_name("18~19-0620-0625-方黑名片架-20单-3个", [])
+
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate["raw_candidate"], "方黑名片架")
+        self.assertEqual(candidate["prefix"], "")
+        self.assertEqual(candidate["category"], "方黑名片架")
+
+    def test_extract_category_candidate_cleans_separated_prefix(self) -> None:
+        from extract_orders import build_category_candidate_from_name
+
+        candidate = build_category_candidate_from_name("17-0625-WZY-纯木名片架-5单5个", ["WZY"])
+
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate["raw_candidate"], "WZY-纯木名片架")
+        self.assertEqual(candidate["prefix"], "WZY")
+        self.assertEqual(candidate["category"], "纯木名片架")
+
+    def test_extract_category_candidate_cleans_attached_prefix(self) -> None:
+        from extract_orders import build_category_candidate_from_name
+
+        candidate = build_category_candidate_from_name("14-0625-HAL小钢片-4单5个", ["HAL"])
+
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate["raw_candidate"], "HAL小钢片")
+        self.assertEqual(candidate["prefix"], "HAL")
+        self.assertEqual(candidate["category"], "小钢片")
+
+    def test_extract_category_candidate_ignores_structure_only_name(self) -> None:
+        from extract_orders import build_category_candidate_from_name
+
+        candidate = build_category_candidate_from_name("18~19-0620-0625-20单-3个", ["WZY"])
+
+        self.assertIsNone(candidate)
+
     def test_dry_run_scans_and_reports_without_writing_output_or_backup(self) -> None:
         workbook_path = self.work_dir / "0507-WZY-knife-1order-2pcs.xlsx"
         make_order_workbook(workbook_path, [("ORDER-DRY", "SKU-DRY", 2)])
