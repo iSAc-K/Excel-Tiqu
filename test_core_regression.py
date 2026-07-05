@@ -6,6 +6,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 from openpyxl import Workbook, load_workbook
 
@@ -21,6 +22,22 @@ MODIFY_PREFIX = "\u4fee\u6539"
 WING_IMAGE_NECKLACE = "\u7fc5\u8180\u56fe\u7247\u9879\u94fe"
 SILVER_WING_IMAGE_NECKLACE = "\u94f6\u7fc5\u8180\u56fe\u7247\u9879\u94fe"
 DOG_TAG_KEYCHAIN = "\u519b\u724c\u94a5\u5319\u6263"
+
+
+class DummyStatusVar:
+    def __init__(self) -> None:
+        self.value = ""
+
+    def set(self, value: str) -> None:
+        self.value = value
+
+
+class DummyMaster:
+    def __init__(self) -> None:
+        self.saved = False
+
+    def save_current_settings(self) -> None:
+        self.saved = True
 
 
 def make_order_workbook(path: Path, rows: list[tuple[str, str, object]], *, sheet_name: str = "Sheet1") -> None:
@@ -241,6 +258,45 @@ class CoreRegressionTests(unittest.TestCase):
 
         self.assertEqual(config_data.prefixes, ["HAL"])
         self.assertEqual(config_data.categories["方白名片架"], ["方白名片架"])
+
+    def test_category_config_window_preserves_prefixes_when_saving_keywords(self) -> None:
+        self.category_config_path.write_text(
+            json.dumps(
+                {
+                    "prefixes": ["HAL", "WZY"],
+                    "categories": {"方白名片架": ["方白名片架"]},
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        import extract_orders_gui
+        from extract_orders import load_category_config_data
+
+        window = object.__new__(extract_orders_gui.CategoryConfigWindow)
+        window.config_path = self.category_config_path
+        window.config = {}
+        window.prefixes = []
+        window.current_category = None
+        window.status_var = DummyStatusVar()
+        window.master = DummyMaster()
+        window.refresh_categories = lambda: None
+
+        with (
+            patch.object(extract_orders_gui.messagebox, "showinfo"),
+            patch.object(extract_orders_gui.messagebox, "showwarning"),
+            patch.object(extract_orders_gui.messagebox, "showerror"),
+        ):
+            window.load_config()
+            window.config["方白名片架"].append("新关键词")
+            window.save_config()
+        config_data, _, error = load_category_config_data(self.category_config_path)
+
+        self.assertEqual(error, "")
+        self.assertEqual(config_data.prefixes, ["HAL", "WZY"])
+        self.assertEqual(config_data.categories["方白名片架"], ["方白名片架", "新关键词"])
+        self.assertTrue(window.master.saved)
 
     def test_save_confirmed_category_candidate_rejects_invalid_existing_config(self) -> None:
         invalid_json = "{ invalid json"

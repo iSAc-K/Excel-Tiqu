@@ -274,6 +274,7 @@ class CategoryConfigWindow(ctk.CTkToplevel):
         self.transient(master)
         self.config_path = config_path
         self.config: dict[str, list[str]] = {}
+        self.prefixes: list[str] = []
         self.current_category: str | None = None
         self.status_var = tk.StringVar(value="")
 
@@ -348,19 +349,20 @@ class CategoryConfigWindow(ctk.CTkToplevel):
 
     def load_config(self) -> None:
         try:
-            from extract_orders import ensure_default_category_config, load_category_config
+            from extract_orders import load_category_config_data
 
-            ensure_default_category_config(self.config_path)
-            config, _, error = load_category_config(self.config_path)
+            config_data, _, error = load_category_config_data(self.config_path)
             if error:
                 messagebox.showwarning("配置读取失败", error, parent=self)
                 self.status_var.set(f"已回退默认配置：{self.config_path}")
             else:
                 self.status_var.set(f"已加载：{self.config_path}")
-            self.config = {category: list(keywords) for category, keywords in config.items()}
+            self.config = {category: list(keywords) for category, keywords in config_data.categories.items()}
+            self.prefixes = list(config_data.prefixes)
         except Exception as exc:
             messagebox.showerror("配置读取失败", f"无法读取品类配置：{exc}", parent=self)
             self.config = {}
+            self.prefixes = []
             self.status_var.set(f"配置读取失败：{self.config_path}")
         self.refresh_categories()
 
@@ -486,9 +488,9 @@ class CategoryConfigWindow(ctk.CTkToplevel):
 
     def save_config(self) -> None:
         try:
-            from extract_orders import save_category_config
+            from extract_orders import CategoryConfigData, save_category_config_data
 
-            save_category_config(self.config, self.config_path)
+            save_category_config_data(CategoryConfigData(categories=self.config, prefixes=self.prefixes), self.config_path)
         except Exception as exc:
             messagebox.showerror("保存失败", f"保存品类配置失败：{exc}", parent=self)
             return
@@ -503,6 +505,7 @@ class CategoryConfigWindow(ctk.CTkToplevel):
             from extract_orders import copy_default_category_keywords
 
             self.config = copy_default_category_keywords()
+            self.prefixes = []
         except Exception as exc:
             messagebox.showerror("恢复失败", f"恢复默认配置失败：{exc}", parent=self)
             return
