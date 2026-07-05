@@ -274,6 +274,7 @@ class CategoryConfigWindow(ctk.CTkToplevel):
         self.transient(master)
         self.config_path = config_path
         self.config: dict[str, list[str]] = {}
+        self.prefixes: list[str] = []
         self.current_category: str | None = None
         self.status_var = tk.StringVar(value="")
 
@@ -348,19 +349,20 @@ class CategoryConfigWindow(ctk.CTkToplevel):
 
     def load_config(self) -> None:
         try:
-            from extract_orders import ensure_default_category_config, load_category_config
+            from extract_orders import load_category_config_data
 
-            ensure_default_category_config(self.config_path)
-            config, _, error = load_category_config(self.config_path)
+            config_data, _, error = load_category_config_data(self.config_path)
             if error:
                 messagebox.showwarning("配置读取失败", error, parent=self)
                 self.status_var.set(f"已回退默认配置：{self.config_path}")
             else:
                 self.status_var.set(f"已加载：{self.config_path}")
-            self.config = {category: list(keywords) for category, keywords in config.items()}
+            self.config = {category: list(keywords) for category, keywords in config_data.categories.items()}
+            self.prefixes = list(config_data.prefixes)
         except Exception as exc:
             messagebox.showerror("配置读取失败", f"无法读取品类配置：{exc}", parent=self)
             self.config = {}
+            self.prefixes = []
             self.status_var.set(f"配置读取失败：{self.config_path}")
         self.refresh_categories()
 
@@ -486,9 +488,9 @@ class CategoryConfigWindow(ctk.CTkToplevel):
 
     def save_config(self) -> None:
         try:
-            from extract_orders import save_category_config
+            from extract_orders import CategoryConfigData, save_category_config_data
 
-            save_category_config(self.config, self.config_path)
+            save_category_config_data(CategoryConfigData(categories=self.config, prefixes=self.prefixes), self.config_path)
         except Exception as exc:
             messagebox.showerror("保存失败", f"保存品类配置失败：{exc}", parent=self)
             return
@@ -503,11 +505,182 @@ class CategoryConfigWindow(ctk.CTkToplevel):
             from extract_orders import copy_default_category_keywords
 
             self.config = copy_default_category_keywords()
+            self.prefixes = []
         except Exception as exc:
             messagebox.showerror("恢复失败", f"恢复默认配置失败：{exc}", parent=self)
             return
         self.current_category = next(iter(self.config), None)
         self.refresh_categories()
+
+
+class NewCategoryCandidatesWindow(ctk.CTkToplevel):
+    def __init__(self, master: ctk.CTk, config_path: Path, candidates: list[dict[str, Any]]) -> None:
+        super().__init__(master)
+        self.title("新品类候选确认")
+        self.geometry("900x560")
+        self.minsize(820, 500)
+        self.transient(master)
+        self.config_path = config_path
+        self.candidates = candidates
+        self.current_index: int | None = None
+        self.prefix_var = tk.StringVar(value="")
+        self.category_var = tk.StringVar(value="")
+        self.status_var = tk.StringVar(value="")
+
+        self._build_ui()
+        self.refresh_candidates()
+        if self.candidates:
+            self.candidate_listbox.selection_set(0)
+            self.candidate_listbox.activate(0)
+            self.on_candidate_select()
+        self.grab_set()
+
+    def _build_ui(self) -> None:
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
+
+        header = ctk.CTkFrame(self, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", padx=20, pady=(18, 8))
+        header.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(header, text="新品类候选确认", font=ctk.CTkFont(size=22, weight="bold")).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(
+            header,
+            text="从最近一次提取结果中确认新品类，并写入 category_config.json。",
+            text_color="#5b6675",
+        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
+
+        body = ctk.CTkFrame(self, fg_color="#f6f8fb")
+        body.grid(row=1, column=0, sticky="nsew", padx=20, pady=10)
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_columnconfigure(1, weight=2)
+        body.grid_rowconfigure(0, weight=1)
+
+        left = ctk.CTkFrame(body, corner_radius=8)
+        left.grid(row=0, column=0, sticky="nsew", padx=(12, 6), pady=12)
+        left.grid_columnconfigure(0, weight=1)
+        left.grid_rowconfigure(1, weight=1)
+        ctk.CTkLabel(left, text="候选列表", font=ctk.CTkFont(size=15, weight="bold")).grid(row=0, column=0, sticky="w", padx=12, pady=(12, 8))
+        self.candidate_listbox = tk.Listbox(left, exportselection=False, activestyle="none", relief="flat", highlightthickness=1)
+        self.candidate_listbox.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 12))
+        self.candidate_listbox.bind("<<ListboxSelect>>", self.on_candidate_select)
+
+        right = ctk.CTkFrame(body, corner_radius=8)
+        right.grid(row=0, column=1, sticky="nsew", padx=(6, 12), pady=12)
+        right.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(right, text="候选详情", font=ctk.CTkFont(size=15, weight="bold")).grid(row=0, column=0, columnspan=2, sticky="w", padx=14, pady=(14, 10))
+        self.detail_text = ctk.CTkTextbox(right, height=150, wrap=tk.WORD, fg_color="#f8fafc", text_color="#172033")
+        self.detail_text.grid(row=1, column=0, columnspan=2, sticky="ew", padx=14, pady=(0, 12))
+        self.detail_text.configure(state=tk.DISABLED)
+
+        ctk.CTkLabel(right, text="前缀").grid(row=2, column=0, sticky="w", padx=(14, 8), pady=(0, 10))
+        ctk.CTkEntry(right, textvariable=self.prefix_var, height=36).grid(row=2, column=1, sticky="ew", padx=(0, 14), pady=(0, 10))
+        ctk.CTkLabel(right, text="品类").grid(row=3, column=0, sticky="w", padx=(14, 8), pady=(0, 10))
+        ctk.CTkEntry(right, textvariable=self.category_var, height=36).grid(row=3, column=1, sticky="ew", padx=(0, 14), pady=(0, 10))
+
+        actions = ctk.CTkFrame(right, fg_color="transparent")
+        actions.grid(row=4, column=0, columnspan=2, sticky="ew", padx=14, pady=(4, 12))
+        ctk.CTkButton(actions, text="按前缀重新切分", width=126, fg_color="#4b5563", command=self.resplit_by_prefix).pack(side=tk.LEFT)
+        ctk.CTkButton(actions, text="保存为新品类", width=116, command=self.save_candidate).pack(side=tk.LEFT, padx=8)
+        ctk.CTkButton(actions, text="忽略此候选", width=108, fg_color="#9f1239", command=self.ignore_candidate).pack(side=tk.LEFT)
+
+        ctk.CTkLabel(right, textvariable=self.status_var, anchor="w", text_color="#5b6675").grid(row=5, column=0, columnspan=2, sticky="ew", padx=14, pady=(0, 14))
+
+        footer = ctk.CTkFrame(self, fg_color="transparent")
+        footer.grid(row=2, column=0, sticky="ew", padx=20, pady=(2, 18))
+        footer.grid_columnconfigure(0, weight=1)
+        ctk.CTkButton(footer, text="关闭", width=88, fg_color="#6b7280", command=self.destroy).grid(row=0, column=1, sticky="e")
+
+    def refresh_candidates(self) -> None:
+        self.candidate_listbox.delete(0, tk.END)
+        for candidate in self.candidates:
+            status = str(candidate.get("status") or "待确认")
+            category = str(candidate.get("category") or "")
+            source_name = str(candidate.get("source_name") or candidate.get("excel_file") or "")
+            self.candidate_listbox.insert(tk.END, f"[{status}] {category} - {source_name}")
+
+    def selected_index(self) -> int | None:
+        selection = self.candidate_listbox.curselection()
+        if not selection:
+            return None
+        return int(selection[0])
+
+    def on_candidate_select(self, _event: tk.Event | None = None) -> None:
+        index = self.selected_index()
+        if index is None:
+            return
+        self.current_index = index
+        candidate = self.candidates[index]
+        self.prefix_var.set(str(candidate.get("prefix") or ""))
+        self.category_var.set(str(candidate.get("category") or ""))
+        status = str(candidate.get("status") or "待确认")
+        raw_candidate = str(candidate.get("raw_candidate") or "")
+        source_name = str(candidate.get("source_name") or "")
+        archive_name = str(candidate.get("archive_name") or "")
+        excel_file = str(candidate.get("excel_file") or "")
+        details = [
+            f"状态：{status}",
+            f"原始候选：{raw_candidate}",
+            f"来源名称：{source_name}",
+            f"压缩包：{archive_name}",
+            f"Excel 文件：{excel_file}",
+        ]
+        self.detail_text.configure(state=tk.NORMAL)
+        self.detail_text.delete("1.0", tk.END)
+        self.detail_text.insert("1.0", "\n".join(details))
+        self.detail_text.configure(state=tk.DISABLED)
+        self.status_var.set(f"正在查看第 {index + 1} / {len(self.candidates)} 个候选")
+
+    def update_current_candidate(self, *, status: str | None = None) -> None:
+        if self.current_index is None:
+            return
+        candidate = self.candidates[self.current_index]
+        candidate["prefix"] = self.prefix_var.get().strip()
+        candidate["category"] = self.category_var.get().strip()
+        if status:
+            candidate["status"] = status
+        self.refresh_candidates()
+        self.candidate_listbox.selection_set(self.current_index)
+        self.candidate_listbox.activate(self.current_index)
+        self.candidate_listbox.see(self.current_index)
+        self.on_candidate_select()
+
+    def resplit_by_prefix(self) -> None:
+        if self.current_index is None:
+            return
+        prefix = self.prefix_var.get().strip()
+        if not prefix:
+            messagebox.showwarning("新品类候选", "请先输入前缀。", parent=self)
+            return
+        raw_candidate = str(self.candidates[self.current_index].get("raw_candidate") or "").strip()
+        if raw_candidate.startswith(prefix):
+            self.category_var.set(raw_candidate[len(prefix):].strip(" -—–"))
+            self.update_current_candidate()
+            return
+        messagebox.showinfo("新品类候选", "原始候选不是以该前缀开头，未重新切分。", parent=self)
+
+    def save_candidate(self) -> None:
+        if self.current_index is None:
+            return
+        prefix = self.prefix_var.get().strip()
+        category = self.category_var.get().strip()
+        if not category:
+            messagebox.showwarning("新品类候选", "品类不能为空。", parent=self)
+            return
+        try:
+            from extract_orders import save_confirmed_category_candidate
+
+            save_confirmed_category_candidate(self.config_path, prefix=prefix, category=category, keyword=category)
+        except Exception as exc:
+            messagebox.showerror("保存失败", f"保存新品类候选失败：{exc}", parent=self)
+            return
+        self.update_current_candidate(status="已保存")
+        messagebox.showinfo("保存成功", "新品类候选已保存到品类关键词配置。", parent=self)
+
+    def ignore_candidate(self) -> None:
+        if self.current_index is None:
+            return
+        self.update_current_candidate(status="已忽略")
 
 
 class ExtractOrdersApp(ctk.CTk):
@@ -525,7 +698,7 @@ class ExtractOrdersApp(ctk.CTk):
 
         self.log_queue: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.worker_thread: threading.Thread | None = None
-        self.last_result: dict[str, Any] | None = None
+        self.last_result: dict[str, Any] = {}
         self.last_error_report_rows: list[dict[str, Any]] = []
         self.selected_page = str(self.settings.get("selected_page") or "start")
         if self.selected_page not in PAGE_TITLES:
@@ -826,9 +999,11 @@ class ExtractOrdersApp(ctk.CTk):
         ctk.CTkLabel(config_panel, text="常用配置会自动记忆。品类关键词会影响订单归类，修改后下一次处理生效。", wraplength=260, justify="left", text_color="#64748b").grid(row=1, column=0, sticky="ew", padx=18, pady=(0, 16))
         self.category_config_button = ctk.CTkButton(config_panel, text="品类关键词配置", height=38, command=self.open_category_config)
         self.category_config_button.grid(row=2, column=0, sticky="ew", padx=18, pady=(0, 10))
-        ctk.CTkButton(config_panel, text="打开程序 logs 文件夹", height=38, fg_color="#4b5563", command=self.open_logs_folder).grid(row=3, column=0, sticky="ew", padx=18, pady=(0, 10))
-        ctk.CTkButton(config_panel, text="打开输出文件夹", height=38, fg_color="#4b5563", command=self.open_output_folder).grid(row=4, column=0, sticky="ew", padx=18, pady=(0, 10))
-        ctk.CTkLabel(config_panel, text=f"配置文件：\n{app_settings_path()}", wraplength=260, justify="left", text_color="#64748b").grid(row=5, column=0, sticky="ew", padx=18, pady=(16, 0))
+        self.category_candidates_button = ctk.CTkButton(config_panel, text="新品类候选确认", height=38, command=self.open_category_candidates)
+        self.category_candidates_button.grid(row=3, column=0, sticky="ew", padx=18, pady=(0, 10))
+        ctk.CTkButton(config_panel, text="打开程序 logs 文件夹", height=38, fg_color="#4b5563", command=self.open_logs_folder).grid(row=4, column=0, sticky="ew", padx=18, pady=(0, 10))
+        ctk.CTkButton(config_panel, text="打开输出文件夹", height=38, fg_color="#4b5563", command=self.open_output_folder).grid(row=5, column=0, sticky="ew", padx=18, pady=(0, 10))
+        ctk.CTkLabel(config_panel, text=f"配置文件：\n{app_settings_path()}", wraplength=260, justify="left", text_color="#64748b").grid(row=6, column=0, sticky="ew", padx=18, pady=(16, 0))
 
         self.update_report_buttons()
         self.replace_stats("还没有处理结果。")
@@ -938,6 +1113,13 @@ class ExtractOrdersApp(ctk.CTk):
     def open_category_config(self) -> None:
         CategoryConfigWindow(self, category_config_path())
 
+    def open_category_candidates(self) -> None:
+        candidates = (self.last_result or {}).get("category_candidates") or []
+        if not candidates:
+            messagebox.showinfo("新品类候选", "当前没有可确认的新品类候选。请先运行一次提取。", parent=self)
+            return
+        NewCategoryCandidatesWindow(self, category_config_path(), candidates)
+
     def choose_input_folder(self) -> None:
         folder = filedialog.askdirectory(title="选择压缩包所在文件夹")
         if folder:
@@ -1003,7 +1185,7 @@ class ExtractOrdersApp(ctk.CTk):
         self.clear_logs()
         self.clear_stats()
         self.reset_progress()
-        self.last_result = None
+        self.last_result = {}
         self.last_error_report_rows = []
         self.update_report_buttons()
         self.set_running_state(True)
@@ -1173,6 +1355,7 @@ class ExtractOrdersApp(ctk.CTk):
                 pass
         self.start_button.configure(text="处理中..." if running else "开始提取")
         self.category_config_button.configure(state=state)
+        self.category_candidates_button.configure(state=state)
         self.export_errors_button.configure(state=state)
 
     def update_progress(self, payload: dict[str, Any]) -> None:
@@ -1266,7 +1449,7 @@ class ExtractOrdersApp(ctk.CTk):
         except Exception as exc:
             messagebox.showerror("导出失败", f"导出异常列表失败：{exc}")
             return
-        if self.last_result is not None:
+        if self.last_result:
             self.last_result["error_report_path"] = str(export_path.resolve())
         self.append_log(f"异常列表已导出：{export_path}")
         self.update_report_buttons()

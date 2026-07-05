@@ -7,6 +7,7 @@ import unittest
 import zipfile
 from datetime import date
 from pathlib import Path
+from unittest.mock import patch
 
 from openpyxl import Workbook, load_workbook
 
@@ -23,6 +24,22 @@ AFTER_SALE_PREFIX = "\u552e\u540e"
 WING_IMAGE_NECKLACE = "\u7fc5\u8180\u56fe\u7247\u9879\u94fe"
 SILVER_WING_IMAGE_NECKLACE = "\u94f6\u7fc5\u8180\u56fe\u7247\u9879\u94fe"
 DOG_TAG_KEYCHAIN = "\u519b\u724c\u94a5\u5319\u6263"
+
+
+class DummyStatusVar:
+    def __init__(self) -> None:
+        self.value = ""
+
+    def set(self, value: str) -> None:
+        self.value = value
+
+
+class DummyMaster:
+    def __init__(self) -> None:
+        self.saved = False
+
+    def save_current_settings(self) -> None:
+        self.saved = True
 
 
 def make_order_workbook(path: Path, rows: list[tuple[str, str, object]], *, sheet_name: str = "Sheet1") -> None:
@@ -154,6 +171,224 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertTrue(zip_path.exists())
         with zipfile.ZipFile(zip_path) as archive:
             self.assertEqual(archive.namelist(), [workbook_path.name])
+
+    def test_load_old_category_config_returns_empty_prefixes(self) -> None:
+        self.category_config_path.write_text(
+            json.dumps({"方黑名片架": ["方黑名片架"]}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        from extract_orders import load_category_config_data
+
+        config_data, path, error = load_category_config_data(self.category_config_path)
+
+        self.assertEqual(error, "")
+        self.assertEqual(Path(path), self.category_config_path)
+        self.assertEqual(config_data.categories, {"方黑名片架": ["方黑名片架"]})
+        self.assertEqual(config_data.prefixes, [])
+
+    def test_load_old_category_config_allows_prefixes_category_name(self) -> None:
+        self.category_config_path.write_text(
+            json.dumps({"prefixes": ["prefix keyword"]}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        from extract_orders import load_category_config_data
+
+        config_data, _, error = load_category_config_data(self.category_config_path)
+
+        self.assertEqual(error, "")
+        self.assertEqual(config_data.categories, {"prefixes": ["prefix keyword"]})
+        self.assertEqual(config_data.prefixes, [])
+
+    def test_load_old_category_config_allows_categories_category_name(self) -> None:
+        self.category_config_path.write_text(
+            json.dumps({"categories": ["category keyword"]}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        from extract_orders import load_category_config_data
+
+        config_data, _, error = load_category_config_data(self.category_config_path)
+
+        self.assertEqual(error, "")
+        self.assertEqual(config_data.categories, {"categories": ["category keyword"]})
+        self.assertEqual(config_data.prefixes, [])
+
+    def test_load_structured_category_config_reads_prefixes(self) -> None:
+        self.category_config_path.write_text(
+            json.dumps(
+                {
+                    "prefixes": ["WZY", "HAL"],
+                    "categories": {"纯木名片架": ["纯木名片架"]},
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        from extract_orders import load_category_config_data
+
+        config_data, _, error = load_category_config_data(self.category_config_path)
+
+        self.assertEqual(error, "")
+        self.assertEqual(config_data.prefixes, ["WZY", "HAL"])
+        self.assertEqual(config_data.categories, {"纯木名片架": ["纯木名片架"]})
+
+    def test_save_confirmed_category_candidate_adds_prefix_and_category(self) -> None:
+        self.category_config_path.write_text(
+            json.dumps({"小钢片": ["小钢片"]}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        from extract_orders import save_confirmed_category_candidate, load_category_config_data
+
+        save_confirmed_category_candidate(
+            self.category_config_path,
+            prefix="HAL",
+            category="方白名片架",
+            keyword="方白名片架",
+        )
+        config_data, _, error = load_category_config_data(self.category_config_path)
+
+        self.assertEqual(error, "")
+        self.assertEqual(config_data.prefixes, ["HAL"])
+        self.assertEqual(config_data.categories["方白名片架"], ["方白名片架"])
+        self.assertIn("小钢片", config_data.categories)
+
+    def test_save_confirmed_category_candidate_merges_without_duplicates(self) -> None:
+        self.category_config_path.write_text(
+            json.dumps(
+                {
+                    "prefixes": ["HAL"],
+                    "categories": {"方白名片架": ["方白名片架"]},
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        from extract_orders import save_confirmed_category_candidate, load_category_config_data
+
+        save_confirmed_category_candidate(
+            self.category_config_path,
+            prefix="HAL",
+            category="方白名片架",
+            keyword="方白名片架",
+        )
+        config_data, _, _ = load_category_config_data(self.category_config_path)
+
+        self.assertEqual(config_data.prefixes, ["HAL"])
+        self.assertEqual(config_data.categories["方白名片架"], ["方白名片架"])
+
+    def test_category_config_window_preserves_prefixes_when_saving_keywords(self) -> None:
+        self.category_config_path.write_text(
+            json.dumps(
+                {
+                    "prefixes": ["HAL", "WZY"],
+                    "categories": {"方白名片架": ["方白名片架"]},
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        import extract_orders_gui
+        from extract_orders import load_category_config_data
+
+        window = object.__new__(extract_orders_gui.CategoryConfigWindow)
+        window.config_path = self.category_config_path
+        window.config = {}
+        window.prefixes = []
+        window.current_category = None
+        window.status_var = DummyStatusVar()
+        window.master = DummyMaster()
+        window.refresh_categories = lambda: None
+
+        with (
+            patch.object(extract_orders_gui.messagebox, "showinfo"),
+            patch.object(extract_orders_gui.messagebox, "showwarning"),
+            patch.object(extract_orders_gui.messagebox, "showerror"),
+        ):
+            window.load_config()
+            window.config["方白名片架"].append("新关键词")
+            window.save_config()
+        config_data, _, error = load_category_config_data(self.category_config_path)
+
+        self.assertEqual(error, "")
+        self.assertEqual(config_data.prefixes, ["HAL", "WZY"])
+        self.assertEqual(config_data.categories["方白名片架"], ["方白名片架", "新关键词"])
+        self.assertTrue(window.master.saved)
+
+    def test_save_confirmed_category_candidate_rejects_invalid_existing_config(self) -> None:
+        invalid_json = "{ invalid json"
+        self.category_config_path.write_text(invalid_json, encoding="utf-8")
+
+        from extract_orders import save_confirmed_category_candidate
+
+        with self.assertRaises(ValueError):
+            save_confirmed_category_candidate(
+                self.category_config_path,
+                prefix="HAL",
+                category="方白名片架",
+                keyword="方白名片架",
+            )
+
+        self.assertEqual(self.category_config_path.read_text(encoding="utf-8"), invalid_json)
+
+    def test_extract_category_candidate_from_folder_name(self) -> None:
+        from extract_orders import build_category_candidate_from_name
+
+        candidate = build_category_candidate_from_name("18~19-0620-0625-方黑名片架-20单-3个", [])
+
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate["raw_candidate"], "方黑名片架")
+        self.assertEqual(candidate["prefix"], "")
+        self.assertEqual(candidate["category"], "方黑名片架")
+
+    def test_extract_category_candidate_cleans_separated_prefix(self) -> None:
+        from extract_orders import build_category_candidate_from_name
+
+        candidate = build_category_candidate_from_name("17-0625-WZY-纯木名片架-5单5个", ["WZY"])
+
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate["raw_candidate"], "WZY-纯木名片架")
+        self.assertEqual(candidate["prefix"], "WZY")
+        self.assertEqual(candidate["category"], "纯木名片架")
+
+    def test_extract_category_candidate_cleans_attached_prefix(self) -> None:
+        from extract_orders import build_category_candidate_from_name
+
+        candidate = build_category_candidate_from_name("14-0625-HAL小钢片-4单5个", ["HAL"])
+
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate["raw_candidate"], "HAL小钢片")
+        self.assertEqual(candidate["prefix"], "HAL")
+        self.assertEqual(candidate["category"], "小钢片")
+
+    def test_extract_category_candidate_keeps_extensionless_dot_date_folder_name(self) -> None:
+        from extract_orders import build_category_candidate_from_name
+
+        candidate = build_category_candidate_from_name("33~35-4.18-方黑名片架-20单-3个", [])
+
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate["category"], "方黑名片架")
+
+    def test_extract_category_candidate_does_not_strip_attached_ascii_prefix_extension(self) -> None:
+        from extract_orders import build_category_candidate_from_name
+
+        candidate = build_category_candidate_from_name("17-0625-WZYX小钢片-4单5个", ["WZY"])
+
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate["prefix"], "")
+        self.assertEqual(candidate["category"], "WZYX小钢片")
+
+    def test_extract_category_candidate_ignores_structure_only_name(self) -> None:
+        from extract_orders import build_category_candidate_from_name
+
+        candidate = build_category_candidate_from_name("18~19-0620-0625-20单-3个", ["WZY"])
+
+        self.assertIsNone(candidate)
 
     def test_dry_run_scans_and_reports_without_writing_output_or_backup(self) -> None:
         workbook_path = self.work_dir / "0507-WZY-knife-1order-2pcs.xlsx"
@@ -415,6 +650,57 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual([row["order_id"] for row in rows], ["ORDER-SUB-1", "ORDER-SUB-2"])
         self.assertTrue(Path(result["process_report_path"]).exists())
 
+    def test_archive_multi_subfolder_candidate_uses_subfolder_name(self) -> None:
+        workbook_path = self.work_dir / "order.xlsx"
+        make_order_workbook(workbook_path, [("ORDER-ARCHIVE-CANDIDATE", "SKU-UNKNOWN", 1)])
+        subfolder_name = "1~2-0605-\u65b9\u767d\u540d\u7247\u67b6-1\u5355-1\u4e2a"
+        make_zip(
+            self.input_dir / "multi_subfolder_candidate.zip",
+            [(workbook_path, f"{subfolder_name}/{workbook_path.name}")],
+        )
+
+        result = self.run_tool()
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["total_rows"], 1)
+        self.assertEqual(result["written_rows"], 0)
+        self.assertFalse(self.output_path.exists())
+        candidates = result["category_candidates"]
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["source_name"], subfolder_name)
+        self.assertEqual(candidates[0]["category"], "\u65b9\u767d\u540d\u7247\u67b6")
+
+    def test_archive_candidate_exclusion_keeps_same_basename_classified_subfolder(self) -> None:
+        candidate_dir = self.work_dir / "candidate"
+        candidate_dir.mkdir()
+        candidate_workbook = candidate_dir / "order.xlsx"
+        make_order_workbook(candidate_workbook, [("ORDER-CANDIDATE", "SKU-CANDIDATE", 1)])
+        classified_dir = self.work_dir / "classified"
+        classified_dir.mkdir()
+        classified_workbook = classified_dir / "order.xlsx"
+        make_order_workbook(classified_workbook, [("ORDER-CLASSIFIED", "SKU-CLASSIFIED", 1)])
+        candidate_subfolder = "1~2-0605-\u65b9\u767d\u540d\u7247\u67b6-1\u5355-1\u4e2a"
+        classified_subfolder = f"3~4-0605-{SILVER_WING_IMAGE_NECKLACE}-1\u5355-1\u4e2a"
+        make_zip(
+            self.input_dir / "same_basename_mixed_candidates.zip",
+            [
+                (candidate_workbook, f"{candidate_subfolder}/{candidate_workbook.name}"),
+                (classified_workbook, f"{classified_subfolder}/{classified_workbook.name}"),
+            ],
+        )
+
+        result = self.run_tool()
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["total_rows"], 2)
+        self.assertEqual(len(result["category_candidates"]), 1)
+        self.assertEqual(result["written_rows"], 1)
+        self.assertTrue(self.output_path.exists())
+        rows = read_summary_rows(self.output_path)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["order_id"], "ORDER-CLASSIFIED")
+        self.assertEqual(rows[0]["sheet"], WING_IMAGE_NECKLACE)
+
     def test_archive_name_is_used_when_excel_filename_has_no_category_or_date(self) -> None:
         workbook_path = self.work_dir / "order.xlsx"
         make_order_workbook(workbook_path, [("ORDER-ARCHIVE-FALLBACK", "SKU-WING", 10)])
@@ -459,6 +745,67 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual(result["written_rows"], 1)
         rows = read_summary_rows(self.output_path)
         self.assertEqual(rows[0]["order_id"], "ORDER-FOLDER")
+
+    def test_unclassified_folder_excel_records_category_candidate(self) -> None:
+        folder = self.input_dir / "0607" / "1~2-0605-\u65b9\u767d\u540d\u7247\u67b6-1\u5355-1\u4e2a"
+        folder.mkdir(parents=True)
+        workbook_path = folder / "random-order.xlsx"
+        make_order_workbook(workbook_path, [("ORDER-UNCLASSIFIED", "SKU-UNKNOWN", 1)])
+
+        result = self.run_tool(input_mode="folders")
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["total_rows"], 1)
+        self.assertEqual(result["written_rows"], 0)
+        self.assertFalse(self.output_path.exists())
+        self.assertTrue((self.input_dir / UNCLASSIFIED_FOLDER_NAME / workbook_path.name).exists())
+        candidates = result["category_candidates"]
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["source_name"], "1~2-0605-\u65b9\u767d\u540d\u7247\u67b6-1\u5355-1\u4e2a")
+        self.assertEqual(candidates[0]["raw_candidate"], "\u65b9\u767d\u540d\u7247\u67b6")
+        self.assertEqual(candidates[0]["category"], "\u65b9\u767d\u540d\u7247\u67b6")
+        self.assertEqual(candidates[0]["status"], "\u5f85\u786e\u8ba4")
+
+    def test_process_report_contains_new_category_candidate_sheet(self) -> None:
+        folder = self.input_dir / "0607" / "1~2-0605-\u65b9\u767d\u540d\u7247\u67b6-1\u5355-1\u4e2a"
+        folder.mkdir(parents=True)
+        workbook_path = folder / "random-order.xlsx"
+        make_order_workbook(workbook_path, [("ORDER-UNCLASSIFIED", "SKU-UNKNOWN", 1)])
+
+        result = self.run_tool(input_mode="folders")
+
+        report_path = Path(result["stats"]["process_report_path"])
+        workbook = load_workbook(report_path, data_only=True)
+        try:
+            self.assertIn("\u65b0\u54c1\u7c7b\u5019\u9009", workbook.sheetnames)
+            rows = list(workbook["\u65b0\u54c1\u7c7b\u5019\u9009"].iter_rows(values_only=True))
+        finally:
+            workbook.close()
+        self.assertEqual(
+            rows[0][:6],
+            ("\u5e8f\u53f7", "\u539f\u59cb\u540d\u79f0", "\u539f\u59cb\u5019\u9009", "\u8bc6\u522b\u524d\u7f00", "\u5019\u9009\u54c1\u7c7b", "\u72b6\u6001"),
+        )
+        self.assertEqual(rows[1][1], "1~2-0605-\u65b9\u767d\u540d\u7247\u67b6-1\u5355-1\u4e2a")
+        self.assertEqual(rows[1][4], "\u65b9\u767d\u540d\u7247\u67b6")
+
+    def test_folder_mode_skips_generated_unclassified_folder_on_later_runs(self) -> None:
+        folder = self.input_dir / "0607" / "1~2-0605-\u65b9\u767d\u540d\u7247\u67b6-1\u5355-1\u4e2a"
+        folder.mkdir(parents=True)
+        workbook_path = folder / "random-order.xlsx"
+        make_order_workbook(workbook_path, [("ORDER-UNCLASSIFIED-RERUN", "SKU-UNKNOWN", 1)])
+
+        first_result = self.run_tool(input_mode="folders")
+
+        self.assertTrue(first_result["success"])
+        self.assertEqual(first_result["total_rows"], 1)
+        self.assertEqual(len(first_result["category_candidates"]), 1)
+        self.assertTrue((self.input_dir / UNCLASSIFIED_FOLDER_NAME / workbook_path.name).exists())
+
+        second_result = self.run_tool(input_mode="folders")
+
+        self.assertTrue(second_result["success"])
+        self.assertEqual(second_result["total_rows"], 1)
+        self.assertEqual(len(second_result["category_candidates"]), 1)
 
     def test_folder_name_is_used_when_excel_filename_has_no_category_or_date(self) -> None:
         folder = self.input_dir / f"13-1216-HC-{SILVER_WING_IMAGE_NECKLACE}-9\u5355-10\u4ef6"
