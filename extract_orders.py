@@ -267,6 +267,35 @@ def load_category_config_data(
         return copy_default_category_config_data(), str(path), f"品类配置文件读取失败：{exc}，已使用内置默认配置"
 
 
+def save_confirmed_category_candidate(
+    config_path: str | Path | None,
+    *,
+    prefix: str = "",
+    category: str,
+    keyword: str = "",
+) -> Path:
+    category_text = str(category).strip()
+    if not category_text:
+        raise ValueError("候选品类不能为空")
+    keyword_text = str(keyword or category_text).strip()
+    prefix_text = str(prefix).strip()
+
+    config_data, _, error = load_category_config_data(config_path, create_if_missing=True)
+    if error and "已使用内置默认配置" not in error:
+        raise ValueError(error)
+
+    if prefix_text and prefix_text not in config_data.prefixes:
+        config_data.prefixes.append(prefix_text)
+
+    keywords = config_data.categories.setdefault(category_text, [])
+    if keyword_text and keyword_text not in keywords:
+        keywords.append(keyword_text)
+    if category_text not in keywords:
+        keywords.insert(0, category_text)
+
+    return save_category_config_data(config_data, config_path)
+
+
 def load_category_config(
     config_path: str | Path | None = None,
     create_if_missing: bool = False,

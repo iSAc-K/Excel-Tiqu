@@ -196,6 +196,52 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual(config_data.prefixes, ["WZY", "HAL"])
         self.assertEqual(config_data.categories, {"纯木名片架": ["纯木名片架"]})
 
+    def test_save_confirmed_category_candidate_adds_prefix_and_category(self) -> None:
+        self.category_config_path.write_text(
+            json.dumps({"小钢片": ["小钢片"]}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        from extract_orders import save_confirmed_category_candidate, load_category_config_data
+
+        save_confirmed_category_candidate(
+            self.category_config_path,
+            prefix="HAL",
+            category="方白名片架",
+            keyword="方白名片架",
+        )
+        config_data, _, error = load_category_config_data(self.category_config_path)
+
+        self.assertEqual(error, "")
+        self.assertEqual(config_data.prefixes, ["HAL"])
+        self.assertEqual(config_data.categories["方白名片架"], ["方白名片架"])
+        self.assertIn("小钢片", config_data.categories)
+
+    def test_save_confirmed_category_candidate_merges_without_duplicates(self) -> None:
+        self.category_config_path.write_text(
+            json.dumps(
+                {
+                    "prefixes": ["HAL"],
+                    "categories": {"方白名片架": ["方白名片架"]},
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        from extract_orders import save_confirmed_category_candidate, load_category_config_data
+
+        save_confirmed_category_candidate(
+            self.category_config_path,
+            prefix="HAL",
+            category="方白名片架",
+            keyword="方白名片架",
+        )
+        config_data, _, _ = load_category_config_data(self.category_config_path)
+
+        self.assertEqual(config_data.prefixes, ["HAL"])
+        self.assertEqual(config_data.categories["方白名片架"], ["方白名片架"])
+
     def test_extract_category_candidate_from_folder_name(self) -> None:
         from extract_orders import build_category_candidate_from_name
 
