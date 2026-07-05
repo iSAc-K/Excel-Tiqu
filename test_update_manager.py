@@ -7,11 +7,14 @@ import tempfile
 import threading
 import unittest
 import urllib.error
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 from unittest.mock import patch
 
 from update_manager import (
     DownloadProgress,
+    UPDATE_MANIFEST_URL,
+    USER_AGENT,
     UpdateCancelled,
     UpdateInfo,
     download_update,
@@ -58,9 +61,27 @@ def make_http_error(code: int, message: str) -> urllib.error.HTTPError:
 
 
 class UpdateManagerTests(unittest.TestCase):
+    def test_update_endpoint_constants(self) -> None:
+        self.assertEqual(
+            UPDATE_MANIFEST_URL,
+            "https://github.com/iSAc-K/Excel-Tiqu/releases/latest/download/update.json",
+        )
+        self.assertEqual(USER_AGENT, "Excel-Tiqu-Updater")
+
+    def test_update_info_and_download_progress_are_immutable(self) -> None:
+        info = UpdateInfo("2.2", "https://example.com/app.zip", "a" * 64, [])
+        progress = DownloadProgress("downloading", 1, 2, 3.0, 4.0, 5.0)
+
+        with self.assertRaises(FrozenInstanceError):
+            info.version = "2.3"  # type: ignore[misc]
+        with self.assertRaises(FrozenInstanceError):
+            progress.phase = "verified"  # type: ignore[misc]
+
     def test_semantic_version_comparison(self) -> None:
         self.assertTrue(is_newer_version("2.10", "2.9.9"))
         self.assertTrue(is_newer_version("2.1.1", "2.1"))
+        self.assertTrue(is_newer_version("v2.2", "2.1.9"))
+        self.assertFalse(is_newer_version("2.2", "v2.2.0"))
         self.assertFalse(is_newer_version("2.1.0", "2.1"))
         self.assertFalse(is_newer_version("2.0.9", "2.1"))
 
@@ -83,9 +104,31 @@ class UpdateManagerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_update_manifest({"version": "2.2", "download_url": "https://example.com/app.zip", "sha256": "bad"})
         with self.assertRaises(ValueError):
+            parse_update_manifest({"version": "2.2", "download_url": "https://example.com/app.zip", "sha256": "A" * 64})
+        with self.assertRaises(ValueError):
             parse_update_manifest(
                 {"version": "not-a-version", "download_url": "https://example.com/app.zip", "sha256": "a" * 64}
             )
+
+    def test_urlopen_uses_certifi_context_when_available(self) -> None:
+        fake_context = object()
+        fake_response = FakeResponse(b"{}")
+
+        with (
+            patch("update_manager.certifi.where", return_value="certifi-ca.pem") as certifi_where,
+            patch("update_manager.ssl.create_default_context", return_value=fake_context) as create_context,
+            patch("update_manager.urllib.request.urlopen", return_value=fake_response) as urlopen,
+        ):
+            response = update_manager._urlopen("https://example.com/update.json", 7.0)
+
+        request = urlopen.call_args.args[0]
+        self.assertIs(response, fake_response)
+        certifi_where.assert_called_once_with()
+        create_context.assert_called_once_with(cafile="certifi-ca.pem")
+        self.assertEqual(request.full_url, "https://example.com/update.json")
+        self.assertEqual(request.headers["User-agent"], USER_AGENT)
+        self.assertEqual(urlopen.call_args.kwargs["timeout"], 7.0)
+        self.assertIs(urlopen.call_args.kwargs["context"], fake_context)
 
     def test_fetch_update_info_decodes_utf8_sig(self) -> None:
         payload = b"\xef\xbb\xbf" + json.dumps(
@@ -122,6 +165,37 @@ class UpdateManagerTests(unittest.TestCase):
 
         self.assertEqual(result, expected)
         self.assertEqual(sleeps, [0.25, 0.25])
+
+    def test_fetch_update_info_retries_transient_error_matrix(self) -> None:
+        cases: list[tuple[str, BaseException]] = [
+            ("connection", ConnectionError("temporary connection failure")),
+            ("url", urllib.error.URLError("temporary url failure")),
+            ("http408", make_http_error(408, "Request Timeout")),
+            ("http429", make_http_error(429, "Too Many Requests")),
+        ]
+
+        for _name, error in cases:
+            with self.subTest(error=repr(error)):
+                calls: list[int] = []
+                sleeps: list[float] = []
+                expected = UpdateInfo("2.4", "https://example.com/app.zip", "a" * 64, [])
+
+                def fetcher() -> UpdateInfo:
+                    calls.append(1)
+                    if len(calls) < 3:
+                        raise error
+                    return expected
+
+                result = fetch_update_info_with_retry(
+                    attempts=3,
+                    retry_delay=0.25,
+                    fetcher=fetcher,
+                    sleeper=sleeps.append,
+                )
+
+                self.assertEqual(result, expected)
+                self.assertEqual(calls, [1, 1, 1])
+                self.assertEqual(sleeps, [0.25, 0.25])
 
     def test_fetch_update_info_does_not_retry_nontransient_http_error(self) -> None:
         calls: list[int] = []
@@ -197,6 +271,13 @@ class UpdateManagerTests(unittest.TestCase):
 
         self.assertEqual(calls, [1])
 
+    def test_fetch_update_info_rejects_attempts_less_than_one(self) -> None:
+        def fetcher() -> UpdateInfo:
+            raise AssertionError("fetcher should not run")
+
+        with self.assertRaisesRegex(ValueError, "attempts must be at least 1"):
+            fetch_update_info_with_retry(attempts=0, fetcher=fetcher)
+
     def test_verify_sha256(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "update.zip"
@@ -204,6 +285,24 @@ class UpdateManagerTests(unittest.TestCase):
 
             self.assertTrue(verify_sha256(path, hashlib.sha256(b"payload").hexdigest()))
             self.assertFalse(verify_sha256(path, "0" * 64))
+
+    def test_verify_sha256_emits_initial_verifying_progress(self) -> None:
+        events: list[DownloadProgress] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "update.zip"
+            path.write_bytes(b"payload")
+
+            self.assertTrue(
+                verify_sha256(
+                    path,
+                    hashlib.sha256(b"payload").hexdigest(),
+                    progress_callback=events.append,
+                    clock=ControlledClock(10, 10),
+                )
+            )
+
+        self.assertEqual(events[0].phase, "verifying")
+        self.assertEqual(events[0].downloaded_bytes, 0)
 
     def test_download_reports_progress_and_verified(self) -> None:
         payload = b"x" * 12
@@ -214,11 +313,12 @@ class UpdateManagerTests(unittest.TestCase):
             download_dir.mkdir()
             with (
                 patch("update_manager._urlopen", return_value=FakeResponse(payload, str(len(payload)))),
-                patch("update_manager.tempfile.mkdtemp", return_value=str(download_dir)),
+                patch("update_manager.tempfile.mkdtemp", return_value=str(download_dir)) as mkdtemp,
             ):
                 path = download_update(info, progress_callback=events.append, clock=ControlledClock(10, 11, 12, 14), chunk_size=4)
 
             self.assertTrue(path.exists())
+            self.assertEqual(mkdtemp.call_args.kwargs["prefix"], "excel-tiqu-update-")
             self.assertEqual([event.downloaded_bytes for event in events if event.phase == "downloading"], [4, 8, 12])
             self.assertEqual(events[-1].phase, "verified")
             path.unlink()
@@ -242,6 +342,39 @@ class UpdateManagerTests(unittest.TestCase):
             ):
                 with self.assertRaises(UpdateCancelled):
                     download_update(info, cancel_event=cancel, progress_callback=cancel_after_first_chunk, chunk_size=4)
+
+            self.assertFalse(download_dir.exists())
+
+    def test_download_open_failure_deletes_temp_dir(self) -> None:
+        info = UpdateInfo("2.2", "https://example.com/app.zip", "a" * 64, [])
+        with tempfile.TemporaryDirectory() as tmp:
+            download_dir = Path(tmp) / "download"
+            download_dir.mkdir()
+            with (
+                patch("update_manager._urlopen", side_effect=OSError("network unavailable")),
+                patch("update_manager.tempfile.mkdtemp", return_value=str(download_dir)),
+            ):
+                with self.assertRaisesRegex(OSError, "network unavailable"):
+                    download_update(info)
+
+            self.assertFalse(download_dir.exists())
+
+    def test_download_progress_callback_failure_deletes_temp_dir(self) -> None:
+        payload = b"payload"
+        info = UpdateInfo("2.2", "https://example.com/app.zip", hashlib.sha256(payload).hexdigest(), [])
+
+        def failing_callback(_event: DownloadProgress) -> None:
+            raise RuntimeError("progress failed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            download_dir = Path(tmp) / "download"
+            download_dir.mkdir()
+            with (
+                patch("update_manager._urlopen", return_value=FakeResponse(payload, str(len(payload)))),
+                patch("update_manager.tempfile.mkdtemp", return_value=str(download_dir)),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "progress failed"):
+                    download_update(info, progress_callback=failing_callback, chunk_size=4)
 
             self.assertFalse(download_dir.exists())
 

@@ -8,12 +8,17 @@ import ssl
 import tempfile
 import time
 import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event
 from typing import Callable, Literal
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+
+try:
+    import certifi
+except ImportError:  # pragma: no cover - depends on the runtime environment.
+    certifi = None  # type: ignore[assignment]
 
 
 UPDATE_MANIFEST_URL = "https://github.com/iSAc-K/Excel-Tiqu/releases/latest/download/update.json"
@@ -104,15 +109,11 @@ def parse_update_manifest(manifest: object) -> UpdateInfo:
 
 
 def _urlopen(url: str, timeout: float):
-    request = Request(url, headers={"User-Agent": USER_AGENT})
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     context = None
-    try:
-        import certifi
-
+    if certifi is not None:
         context = ssl.create_default_context(cafile=certifi.where())
-    except ImportError:
-        context = None
-    return urlopen(request, timeout=timeout, context=context)
+    return urllib.request.urlopen(request, timeout=timeout, context=context)
 
 
 def fetch_update_info(url: str = UPDATE_MANIFEST_URL, timeout: float = 10.0) -> UpdateInfo:
