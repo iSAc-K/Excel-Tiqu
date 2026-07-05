@@ -280,8 +280,12 @@ def save_confirmed_category_candidate(
     keyword_text = str(keyword or category_text).strip()
     prefix_text = str(prefix).strip()
 
-    config_data, _, error = load_category_config_data(config_path, create_if_missing=True)
-    if error and "已使用内置默认配置" not in error:
+    path = Path(config_path).expanduser() if config_path else default_category_config_path()
+    existed_before = path.exists()
+    config_data, _, error = load_category_config_data(path, create_if_missing=True)
+    if error and existed_before:
+        raise ValueError(error)
+    if error and not existed_before and "已使用内置默认配置" not in error:
         raise ValueError(error)
 
     if prefix_text and prefix_text not in config_data.prefixes:
@@ -293,7 +297,7 @@ def save_confirmed_category_candidate(
     if category_text not in keywords:
         keywords.insert(0, category_text)
 
-    return save_category_config_data(config_data, config_path)
+    return save_category_config_data(config_data, path)
 
 
 def load_category_config(

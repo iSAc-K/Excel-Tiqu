@@ -242,6 +242,22 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual(config_data.prefixes, ["HAL"])
         self.assertEqual(config_data.categories["方白名片架"], ["方白名片架"])
 
+    def test_save_confirmed_category_candidate_rejects_invalid_existing_config(self) -> None:
+        invalid_json = "{ invalid json"
+        self.category_config_path.write_text(invalid_json, encoding="utf-8")
+
+        from extract_orders import save_confirmed_category_candidate
+
+        with self.assertRaises(ValueError):
+            save_confirmed_category_candidate(
+                self.category_config_path,
+                prefix="HAL",
+                category="方白名片架",
+                keyword="方白名片架",
+            )
+
+        self.assertEqual(self.category_config_path.read_text(encoding="utf-8"), invalid_json)
+
     def test_extract_category_candidate_from_folder_name(self) -> None:
         from extract_orders import build_category_candidate_from_name
 
