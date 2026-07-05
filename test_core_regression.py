@@ -1,21 +1,25 @@
 from __future__ import annotations
 
+import json
 import shutil
 import tempfile
 import unittest
 import zipfile
+from datetime import date
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
 
-from extract_orders import run_extract
+from extract_orders import OUTPUT_DATE_YEAR, parse_date_from_filename, run_extract
 
 
 ORDER_HEADER = "\u4e9a\u9a6c\u900a\u8ba2\u5355\u53f7"
 QUANTITY_HEADER = "\u6570\u91cf"
 DATE_HEADER = "\u65e5\u671f"
 SKIP_FOLDER_NAME = "\u672a\u5904\u7406\u538b\u7f29\u5305"
+UNCLASSIFIED_FOLDER_NAME = "\u672a\u5206\u7c7bExcel"
 MODIFY_PREFIX = "\u4fee\u6539"
+AFTER_SALE_PREFIX = "\u552e\u540e"
 WING_IMAGE_NECKLACE = "\u7fc5\u8180\u56fe\u7247\u9879\u94fe"
 SILVER_WING_IMAGE_NECKLACE = "\u94f6\u7fc5\u8180\u56fe\u7247\u9879\u94fe"
 DOG_TAG_KEYCHAIN = "\u519b\u724c\u94a5\u5319\u6263"
@@ -80,6 +84,12 @@ def read_report_sheet_rows(report_path: Path, sheet_name: str) -> list[dict[str,
         workbook.close()
 
 
+def as_date(value: object) -> object:
+    if hasattr(value, "date"):
+        return value.date()
+    return value
+
+
 class CoreRegressionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.base = Path(tempfile.mkdtemp(prefix="core_regression_test_"))
@@ -90,6 +100,20 @@ class CoreRegressionTests(unittest.TestCase):
         self.logs_dir = self.base / "logs"
         self.backups_dir = self.base / "backups"
         self.output_path = self.base / "summary.xlsx"
+        self.category_config_path = self.base / "category_config.json"
+        self.category_config_path.write_text(
+            json.dumps(
+                {
+                    "knife": ["knife"],
+                    "real": ["real"],
+                    "single": ["single"],
+                    DOG_TAG_KEYCHAIN: [DOG_TAG_KEYCHAIN],
+                    WING_IMAGE_NECKLACE: [WING_IMAGE_NECKLACE, SILVER_WING_IMAGE_NECKLACE],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
 
     def tearDown(self) -> None:
         shutil.rmtree(self.base, ignore_errors=True)
@@ -113,6 +137,7 @@ class CoreRegressionTests(unittest.TestCase):
             report_dir=str(self.logs_dir),
             backup_dir=str(self.backups_dir),
             skip_exact_duplicates=skip_exact_duplicates,
+            category_config_path=str(self.category_config_path),
             input_mode=input_mode,
             excel_group_mode=excel_group_mode,
             enable_hc_filter=enable_hc_filter,
@@ -188,6 +213,75 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual([row["sku"] for row in rows], ["SKU-A", "SKU-B"])
         self.assertEqual([row["quantity"] for row in rows], [1, 2])
 
+    def test_parse_single_filename_date_returns_date_object(self) -> None:
+        self.assertEqual(parse_date_from_filename("0417-WZY-knife.xlsx"), date(OUTPUT_DATE_YEAR, 4, 17))
+        self.assertEqual(parse_date_from_filename("0507-WZY-knife.xlsx"), date(OUTPUT_DATE_YEAR, 5, 7))
+        self.assertEqual(parse_date_from_filename("0310-WZY-knife.xlsx"), date(OUTPUT_DATE_YEAR, 3, 10))
+
+    def test_parse_filename_date_range_stays_text(self) -> None:
+        self.assertEqual(parse_date_from_filename("0501-0503-WZY-knife.xlsx"), "5月1日-5月3日")
+
+    def test_single_filename_date_is_written_as_real_excel_date(self) -> None:
+        workbook_path = self.work_dir / "0417-WZY-knife-1order-2pcs.xlsx"
+        make_order_workbook(workbook_path, [("ORDER-DATE", "SKU-DATE", 2)])
+        make_zip(self.input_dir / "date.zip", [(workbook_path, workbook_path.name)])
+
+        result = self.run_tool()
+
+        self.assertTrue(result["success"])
+        workbook = load_workbook(self.output_path, data_only=True)
+        try:
+            worksheet = workbook.active
+            cell = worksheet.cell(row=2, column=4)
+            self.assertEqual(as_date(cell.value), date(OUTPUT_DATE_YEAR, 4, 17))
+            self.assertEqual(cell.number_format, 'm"月"d"日"')
+        finally:
+            workbook.close()
+
+    def test_date_range_is_written_as_text(self) -> None:
+        workbook_path = self.work_dir / "0501-0503-WZY-knife-1order-2pcs.xlsx"
+        make_order_workbook(workbook_path, [("ORDER-RANGE", "SKU-RANGE", 2)])
+        make_zip(self.input_dir / "range.zip", [(workbook_path, workbook_path.name)])
+
+        result = self.run_tool()
+
+        self.assertTrue(result["success"])
+        rows = read_summary_rows(self.output_path)
+        self.assertEqual(rows[0]["date"], "5月1日-5月3日")
+
+    def test_append_mode_writes_new_rows_with_real_excel_date(self) -> None:
+        existing = Workbook()
+        worksheet = existing.active
+        worksheet.title = "knife"
+        worksheet.append([ORDER_HEADER, "SKU", QUANTITY_HEADER, DATE_HEADER])
+        worksheet.append(["ORDER-OLD", "SKU-OLD", 1, "4月16日"])
+        existing.save(self.output_path)
+        existing.close()
+
+        workbook_path = self.work_dir / "0417-WZY-knife-1order-2pcs.xlsx"
+        make_order_workbook(workbook_path, [("ORDER-NEW-DATE", "SKU-NEW-DATE", 2)])
+        make_zip(self.input_dir / "append-date.zip", [(workbook_path, workbook_path.name)])
+
+        result = self.run_tool(clear=False)
+
+        self.assertTrue(result["success"])
+        workbook = load_workbook(self.output_path, data_only=True)
+        try:
+            self.assertEqual(workbook["knife"].cell(row=2, column=4).value, "4月16日")
+            new_cell = None
+            for worksheet in workbook.worksheets:
+                for row_index in range(2, worksheet.max_row + 1):
+                    if worksheet.cell(row=row_index, column=1).value == "ORDER-NEW-DATE":
+                        new_cell = worksheet.cell(row=row_index, column=4)
+                        break
+                if new_cell is not None:
+                    break
+            self.assertIsNotNone(new_cell)
+            self.assertEqual(as_date(new_cell.value), date(OUTPUT_DATE_YEAR, 4, 17))
+            self.assertEqual(new_cell.number_format, 'm"月"d"日"')
+        finally:
+            workbook.close()
+
     def test_daily_order_summary_counts_unique_orders_by_filename_date(self) -> None:
         day_one_path = self.work_dir / "0507-WZY-knife-2order-6pcs.xlsx"
         day_two_path = self.work_dir / "0508-WZY-knife-1order-4pcs.xlsx"
@@ -214,17 +308,17 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual(by_date["5月8日"]["数量合计"], 4)
         self.assertEqual(by_date["5月8日"]["明细行数"], 1)
 
-    def test_reissue_before_category_is_skipped_and_copied_to_skip_folder(self) -> None:
+    def test_reissue_before_category_is_processed_normally(self) -> None:
         workbook_path = self.input_dir / f"13-\u8865\u53d1{DOG_TAG_KEYCHAIN}.xlsx"
-        make_order_workbook(workbook_path, [("ORDER-REISSUE-SKIP", "SKU-REISSUE-SKIP", 1)])
+        make_order_workbook(workbook_path, [("ORDER-REISSUE-KEEP-PREFIX", "SKU-REISSUE", 1)])
 
         result = self.run_tool(input_mode="folders")
 
         self.assertTrue(result["success"])
-        self.assertEqual(result["written_rows"], 0)
-        self.assertFalse(self.output_path.exists())
-        skip_copy = self.input_dir / SKIP_FOLDER_NAME / workbook_path.name
-        self.assertTrue(skip_copy.exists())
+        self.assertEqual(result["written_rows"], 1)
+        rows = read_summary_rows(self.output_path)
+        self.assertEqual(rows[0]["sheet"], DOG_TAG_KEYCHAIN)
+        self.assertEqual(rows[0]["order_id"], "ORDER-REISSUE-KEEP-PREFIX")
 
     def test_reissue_after_category_is_processed_normally(self) -> None:
         workbook_path = self.input_dir / f"13-{DOG_TAG_KEYCHAIN}-\u8865\u53d1.xlsx"
@@ -335,21 +429,22 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual(result["written_rows"], 1)
         rows = read_summary_rows(self.output_path)
         self.assertEqual(rows[0]["sheet"], WING_IMAGE_NECKLACE)
-        self.assertEqual(rows[0]["date"], "12\u670816\u65e5")
+        self.assertEqual(as_date(rows[0]["date"]), date(OUTPUT_DATE_YEAR, 12, 16))
         self.assertEqual(result["stats"]["category_counts"], {WING_IMAGE_NECKLACE: 1})
 
-    def test_reissue_before_category_in_archive_name_is_skipped(self) -> None:
+    def test_reissue_before_category_in_archive_name_is_processed_normally(self) -> None:
         workbook_path = self.work_dir / "order.xlsx"
         archive_path = self.input_dir / f"13-\u8865\u53d1{DOG_TAG_KEYCHAIN}.zip"
-        make_order_workbook(workbook_path, [("ORDER-ARCHIVE-REISSUE-SKIP", "SKU-ARCHIVE-REISSUE-SKIP", 1)])
+        make_order_workbook(workbook_path, [("ORDER-ARCHIVE-REISSUE-KEEP", "SKU-ARCHIVE-REISSUE", 1)])
         make_zip(archive_path, [(workbook_path, workbook_path.name)])
 
         result = self.run_tool()
 
         self.assertTrue(result["success"])
-        self.assertEqual(result["written_rows"], 0)
-        self.assertFalse(self.output_path.exists())
-        self.assertTrue((self.input_dir / SKIP_FOLDER_NAME / archive_path.name).exists())
+        self.assertEqual(result["written_rows"], 1)
+        rows = read_summary_rows(self.output_path)
+        self.assertEqual(rows[0]["sheet"], DOG_TAG_KEYCHAIN)
+        self.assertEqual(rows[0]["order_id"], "ORDER-ARCHIVE-REISSUE-KEEP")
 
     def test_folder_mode_recursively_extracts_excel_files(self) -> None:
         nested = self.input_dir / "orders" / "day-1"
@@ -377,8 +472,60 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual(result["written_rows"], 1)
         rows = read_summary_rows(self.output_path)
         self.assertEqual(rows[0]["sheet"], WING_IMAGE_NECKLACE)
-        self.assertEqual(rows[0]["date"], "12\u670816\u65e5")
+        self.assertEqual(as_date(rows[0]["date"]), date(OUTPUT_DATE_YEAR, 12, 16))
         self.assertEqual(result["stats"]["category_counts"], {WING_IMAGE_NECKLACE: 1})
+
+    def test_order_folder_name_has_priority_over_excel_filename_for_category_and_date(self) -> None:
+        folder = self.input_dir / "0607" / f"1~2-0605-{DOG_TAG_KEYCHAIN}-8\u5355-8\u4e2a"
+        folder.mkdir(parents=True)
+        workbook_path = folder / f"0607-{SILVER_WING_IMAGE_NECKLACE}-1\u5355-1\u4e2a.xlsx"
+        make_order_workbook(workbook_path, [("ORDER-FOLDER-PRIORITY", "SKU-DOG", 1)])
+
+        result = self.run_tool(input_mode="folders")
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["written_rows"], 1)
+        rows = read_summary_rows(self.output_path)
+        self.assertEqual(rows[0]["sheet"], DOG_TAG_KEYCHAIN)
+        self.assertEqual(as_date(rows[0]["date"]), date(OUTPUT_DATE_YEAR, 6, 5))
+
+    def test_reissue_file_is_processed_normally(self) -> None:
+        workbook_path = self.input_dir / f"\u8865\u53d10507-{DOG_TAG_KEYCHAIN}-1\u5355-1\u4e2a.xlsx"
+        make_order_workbook(workbook_path, [("ORDER-REISSUE-NORMAL", "SKU-REISSUE", 1)])
+
+        result = self.run_tool(input_mode="folders")
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["written_rows"], 1)
+        rows = read_summary_rows(self.output_path)
+        self.assertEqual(rows[0]["order_id"], "ORDER-REISSUE-NORMAL")
+        self.assertEqual(rows[0]["sheet"], DOG_TAG_KEYCHAIN)
+
+    def test_folder_mode_copies_after_sale_excel_file_to_skip_folder(self) -> None:
+        workbook_path = self.input_dir / f"{AFTER_SALE_PREFIX}-0507-{DOG_TAG_KEYCHAIN}-1\u5355-1\u4e2a.xlsx"
+        make_order_workbook(workbook_path, [("ORDER-AFTER-SALE", "SKU-AFTER-SALE", 1)])
+
+        result = self.run_tool(input_mode="folders")
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["total_rows"], 0)
+        self.assertEqual(result["written_rows"], 0)
+        self.assertFalse(self.output_path.exists())
+        self.assertTrue((self.input_dir / SKIP_FOLDER_NAME / workbook_path.name).exists())
+
+    def test_unclassified_folder_excel_is_copied_and_excluded_from_output(self) -> None:
+        folder = self.input_dir / "0607" / "1~2-0605-unknown-product-1order-1pc"
+        folder.mkdir(parents=True)
+        workbook_path = folder / "random-order.xlsx"
+        make_order_workbook(workbook_path, [("ORDER-UNCLASSIFIED", "SKU-UNKNOWN", 1)])
+
+        result = self.run_tool(input_mode="folders")
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["total_rows"], 1)
+        self.assertEqual(result["written_rows"], 0)
+        self.assertFalse(self.output_path.exists())
+        self.assertTrue((self.input_dir / UNCLASSIFIED_FOLDER_NAME / workbook_path.name).exists())
 
     def test_folder_mode_copies_modify_excel_file_to_skip_folder(self) -> None:
         workbook_path = self.input_dir / f"{MODIFY_PREFIX}-0507-WZY-knife-1order-1pc.xlsx"
@@ -430,6 +577,7 @@ class CoreRegressionTests(unittest.TestCase):
             workers=1,
             report_dir=str(self.logs_dir),
             backup_dir=str(self.backups_dir),
+            category_config_path=str(self.category_config_path),
             input_mode="mixed",
         )
 

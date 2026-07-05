@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import tempfile
 import unittest
@@ -40,6 +41,11 @@ class HcFilterTests(unittest.TestCase):
         self.logs_dir = self.base / "logs"
         self.backups_dir = self.base / "backups"
         self.output_path = self.base / "summary.xlsx"
+        self.category_config_path = self.base / "category_config.json"
+        self.category_config_path.write_text(
+            json.dumps({"normal_order": ["normal_order"]}, ensure_ascii=False),
+            encoding="utf-8",
+        )
 
     def tearDown(self) -> None:
         shutil.rmtree(self.base, ignore_errors=True)
@@ -53,6 +59,7 @@ class HcFilterTests(unittest.TestCase):
             workers=1,
             report_dir=str(self.logs_dir),
             backup_dir=str(self.backups_dir),
+            category_config_path=str(self.category_config_path),
             enable_hc_filter=enable_hc_filter,
             input_mode=input_mode,
         )

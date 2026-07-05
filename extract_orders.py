@@ -11,7 +11,7 @@ import tempfile
 import threading
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -23,6 +23,8 @@ from openpyxl.utils import get_column_letter
 ARCHIVE_EXTENSIONS = {".zip", ".rar", ".7z"}
 EXCEL_EXTENSIONS = {".xlsx", ".xlsm"}
 HC_FOLDER_NAME = "HC"
+UNCLASSIFIED_EXCEL_FOLDER_NAME = "未分类Excel"
+SKIP_FILE_PREFIXES = ("修改", "售后")
 INPUT_MODE_ARCHIVES = "archives"
 INPUT_MODE_FOLDERS = "folders"
 INPUT_MODE_MIXED = "mixed"
@@ -31,6 +33,8 @@ EXCEL_GROUP_SINGLE = "single"
 EXCEL_GROUP_MULTI = "multi"
 EXCEL_GROUP_MODES = {EXCEL_GROUP_SINGLE, EXCEL_GROUP_MULTI}
 OUTPUT_HEADERS = ["亚马逊订单号", "SKU", "数量", "日期"]
+OUTPUT_DATE_YEAR = datetime.now().year
+OUTPUT_DATE_NUMBER_FORMAT = 'm"月"d"日"'
 CORE_HEADER_LABELS = {
     "order_id": "亚马逊订单号",
     "sku": "SKU",
@@ -665,6 +669,26 @@ def build_excel_processing_groups(extracted_root: Path, excel_files: list[Path])
     return sorted(groups, key=lambda item: str(item[0]))
 
 
+def build_recognition_names(
+    excel_file: Path,
+    extracted_root: Path,
+    unit_folder: Path,
+    archive_path: Path,
+) -> list[str]:
+    names: list[str] = []
+    try:
+        relative_parts = list(unit_folder.relative_to(extracted_root).parts)
+    except ValueError:
+        relative_parts = [unit_folder.name] if unit_folder.name else []
+    names.extend(reversed(relative_parts))
+    if archive_path.name != unit_folder.name:
+        names.append(archive_path.name)
+    if archive_path.parent.name and archive_path.parent != extracted_root:
+        names.append(archive_path.parent.name)
+    names.append(excel_file.name)
+    return unique_names(names)
+
+
 def normalize_header(value: Any) -> str:
     """
     标准化表头文字：
@@ -768,7 +792,22 @@ def format_sheet_debug_log(
     )
 
 
-def format_mmdd(value: str) -> str | None:
+def make_output_date(month: int, day: int) -> date | None:
+    try:
+        return date(OUTPUT_DATE_YEAR, month, day)
+    except ValueError:
+        return None
+
+
+def format_output_date_display(value: Any) -> str:
+    if isinstance(value, datetime):
+        return f"{value.month}月{value.day}日"
+    if isinstance(value, date):
+        return f"{value.month}月{value.day}日"
+    return str(value)
+
+
+def format_mmdd_text(value: str) -> str | None:
     month = int(value[:2])
     day = int(value[2:])
     if 1 <= month <= 12 and 1 <= day <= 31:
@@ -776,12 +815,14 @@ def format_mmdd(value: str) -> str | None:
     return None
 
 
-def format_month_day(month_text: str, day_text: str) -> str | None:
+def parse_mmdd_date(value: str) -> date | None:
+    return make_output_date(int(value[:2]), int(value[2:]))
+
+
+def parse_month_day_date(month_text: str, day_text: str) -> date | None:
     month = int(month_text)
     day = int(day_text)
-    if 1 <= month <= 12 and 1 <= day <= 31:
-        return f"{month}月{day}日"
-    return None
+    return make_output_date(month, day)
 
 
 def strip_leading_sequence_prefix(stem: str) -> str:
@@ -793,10 +834,11 @@ def strip_leading_sequence_prefix(stem: str) -> str:
     return stripped
 
 
-def parse_date_from_filename(filename: str) -> str:
+def parse_date_from_filename(filename: str) -> date | str:
     """
     从 Excel 文件名识别日期。
-    例如 0507 -> 5月7日。
+    例如 0507 -> date(OUTPUT_DATE_YEAR, 5, 7)。
+    日期范围保留为文本，例如 0501-0503 -> 5月1日-5月3日。
     识别不到则返回空字符串。
     """
     stem = Path(filename).stem
@@ -807,36 +849,44 @@ def parse_date_from_filename(filename: str) -> str:
 
     range_match = re.search(r"(?<!\d)(\d{4})\s*[-_至到]\s*(\d{4})(?!\d)", stem)
     if range_match:
-        start = format_mmdd(range_match.group(1))
-        end = format_mmdd(range_match.group(2))
+        start = format_mmdd_text(range_match.group(1))
+        end = format_mmdd_text(range_match.group(2))
         if start and end:
             return f"{start}-{end}"
 
     year_match = re.search(r"(?<!\d)(?:20\d{2})[\._\-年](\d{1,2})[\._\-月](\d{1,2})(?:日)?(?!\d)", stem)
     if year_match:
-        parsed = format_month_day(year_match.group(1), year_match.group(2))
+        parsed = parse_month_day_date(year_match.group(1), year_match.group(2))
         if parsed:
             return parsed
 
     for candidate_stem in search_stems:
         separated_match = re.search(r"(?<!\d)(\d{1,2})[\._\-月](\d{1,2})(?:日)?(?!\d)", candidate_stem)
         if separated_match:
-            parsed = format_month_day(separated_match.group(1), separated_match.group(2))
+            parsed = parse_month_day_date(separated_match.group(1), separated_match.group(2))
             if parsed:
                 return parsed
 
     start_match = re.match(r"^(\d{4})(?!\d)", stem)
     if start_match:
-        parsed = format_mmdd(start_match.group(1))
+        parsed = parse_mmdd_date(start_match.group(1))
         if parsed:
             return parsed
 
     any_match = re.search(r"(?<!\d)(\d{4})(?!\d)", stem)
     if any_match:
-        parsed = format_mmdd(any_match.group(1))
+        parsed = parse_mmdd_date(any_match.group(1))
         if parsed:
             return parsed
 
+    return ""
+
+
+def first_detected_date_from_names(names: list[str]) -> date | str:
+    for name in names:
+        parsed = parse_date_from_filename(name)
+        if parsed:
+            return parsed
     return ""
 
 
@@ -876,41 +926,38 @@ def detect_category_from_filename(filename: str, category_keywords: dict[str, li
     return selected[2]
 
 
-def prefixed_reissue_skip_reason(filename: str, category_keywords: dict[str, list[str]] | None = None) -> str:
-    stem = Path(filename).stem
-    reissue_index = stem.find("补发")
-    if reissue_index < 0:
-        return ""
-
-    matches: list[tuple[int, int, int, str, str]] = []
-    keywords_config = category_keywords or CATEGORY_KEYWORDS
-    for category_index, (category, keywords) in enumerate(keywords_config.items()):
-        for keyword in keywords:
-            keyword_index = stem.find(keyword)
-            if keyword_index >= 0:
-                matches.append((keyword_index, len(keyword), category_index, category, keyword))
-
-    if not matches:
-        return ""
-
-    matches.sort(key=lambda item: (-item[1], item[2]))
-    keyword_index, _, _, category, keyword = matches[0]
-    if reissue_index < keyword_index:
-        return f"文件名中“补发”位于品类“{category}”前，跳过处理；命中关键词：{keyword}"
-    return ""
-
-
-def prefixed_reissue_skip_reason_for_names(
-    excel_filename: str,
-    fallback_filename: str = "",
+def first_detected_category_from_names(
+    names: list[str],
     category_keywords: dict[str, list[str]] | None = None,
-) -> str:
-    reason = prefixed_reissue_skip_reason(excel_filename, category_keywords)
-    if reason:
-        return reason
-    if fallback_filename and fallback_filename != excel_filename:
-        return prefixed_reissue_skip_reason(fallback_filename, category_keywords)
+) -> tuple[str, str]:
+    for name in names:
+        category = detect_category_from_filename(name, category_keywords)
+        if category != "未分类":
+            return category, name
+    return "未分类", names[0] if names else ""
+
+
+def should_skip_named_file(path: Path) -> bool:
+    return path.stem.startswith(SKIP_FILE_PREFIXES)
+
+
+def skip_named_file_reason(path: Path) -> str:
+    for prefix in SKIP_FILE_PREFIXES:
+        if path.stem.startswith(prefix):
+            return f"文件名前两个字为“{prefix}”"
     return ""
+
+
+def unique_names(names: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for name in names:
+        text = str(name or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
 
 
 def parse_expected_counts_from_filename(filename: str) -> tuple[int | None, int | None, str]:
@@ -978,7 +1025,7 @@ def build_filename_validation(
     excel_name: str,
     rows: list[dict[str, Any]],
     category: str,
-    date_text: str,
+    date_text: date | str,
     subfolder_name: str = "",
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     expected_orders, expected_quantity, note = parse_expected_counts_from_filename(excel_name)
@@ -1026,7 +1073,7 @@ def build_filename_validation(
         "压缩包名": archive_name,
         "Excel文件名": excel_name,
         "品类": category,
-        "日期": date_text,
+        "日期": format_output_date_display(date_text) if date_text else "",
         "文件名预计单量": expected_orders if expected_orders is not None else "",
         "实际提取单量": actual_orders,
         "单量校验结果": order_result,
@@ -1071,28 +1118,21 @@ def normalize_quantity(value: Any, excel_name: str, row_index: int) -> Any:
 def extract_rows_from_workbook(
     file_path: Path,
     category_keywords: dict[str, list[str]] | None = None,
-    fallback_filename: str = "",
+    recognition_names: list[str] | None = None,
 ) -> tuple[list[dict[str, Any]], bool, str, str, list[dict[str, Any]]]:
     """
     从单个 Excel 文件中提取数据。
     """
-    date_text = parse_date_from_filename(file_path.name)
-    if not date_text and fallback_filename and fallback_filename != file_path.name:
-        fallback_date = parse_date_from_filename(fallback_filename)
-        if fallback_date:
-            add_log(f"Excel 文件名未识别到日期，改用外层名称识别：{fallback_filename}")
-            date_text = fallback_date
+    names = unique_names(list(recognition_names or []) + [file_path.name])
+    date_text = first_detected_date_from_names(names)
     if date_text:
-        add_log(f"识别日期：{date_text}")
+        add_log(f"识别日期：{format_output_date_display(date_text)}")
     else:
         add_log(f"未识别到日期：{file_path.name}，日期列留空")
 
-    category = detect_category_from_filename(file_path.name, category_keywords)
-    if category == "未分类" and fallback_filename and fallback_filename != file_path.name:
-        fallback_category = detect_category_from_filename(fallback_filename, category_keywords)
-        if fallback_category != "未分类":
-            add_log(f"Excel 文件名未命中品类，改用外层名称识别：{fallback_filename}")
-            category = fallback_category
+    category, category_source_name = first_detected_category_from_names(names, category_keywords)
+    if category_source_name and category_source_name != file_path.name and category != "未分类":
+        add_log(f"品类按文件夹或外层名称识别：{category_source_name}")
     add_log(f"识别品类：{category}")
 
     try:
@@ -1245,6 +1285,7 @@ def process_excel_unit(
     unit_folder: Path,
     category_keywords: dict[str, list[str]] | None = None,
     skip_dir: Path | None = None,
+    unclassified_dir: Path | None = None,
     dry_run: bool = False,
     excel_group_mode: str = EXCEL_GROUP_SINGLE,
     copy_skipped_excel_file: bool = False,
@@ -1278,7 +1319,7 @@ def process_excel_unit(
             "正式Excel文件": selected_excel_name,
             "提取行数": len(rows),
             "识别品类": category,
-            "识别日期": date_text,
+            "识别日期": format_output_date_display(date_text) if date_text else "",
             "是否跳过": "是" if skip else "否",
             "异常原因": reason,
             "已复制到": copied_to,
@@ -1338,22 +1379,16 @@ def process_excel_unit(
             if subfolder_name:
                 add_log(f"子文件夹：{subfolder_name}")
             add_log(f"[{archive_path.name}] 找到正式 Excel：{excel_file.name}")
-            if excel_file.stem.startswith("修改"):
-                reason = "文件名前两个字为“修改”"
+            if should_skip_named_file(excel_file):
+                reason = skip_named_file_reason(excel_file)
                 skipped_reasons.append(reason)
-                copied_to = skip_excel_file(excel_file, reason, "修改文件跳过")
-                continue
-
-            reissue_reason = prefixed_reissue_skip_reason_for_names(excel_file.name, archive_path.name, category_keywords)
-            if reissue_reason:
-                skipped_reasons.append(reissue_reason)
-                copied_to = skip_excel_file(excel_file, reissue_reason, "补发文件跳过")
+                copied_to = skip_excel_file(excel_file, reason, "前缀文件跳过")
                 continue
 
             extracted_rows, workbook_success, current_category, current_date_text, current_header_rows = extract_rows_from_workbook(
                 excel_file,
                 category_keywords,
-                archive_path.name,
+                build_recognition_names(excel_file, extracted_root, unit_folder, archive_path),
             )
             for row in current_header_rows:
                 row["压缩包名"] = archive_path.name
@@ -1364,6 +1399,8 @@ def process_excel_unit(
                 row["子文件夹名"] = subfolder_name
             if not workbook_success:
                 continue
+            if current_category == "未分类":
+                copy_unclassified_excel(excel_file, unclassified_dir, dry_run=dry_run)
 
             current_validation, current_quantity_errors = build_filename_validation(
                 archive_path.name,
@@ -1395,20 +1432,15 @@ def process_excel_unit(
     if subfolder_name:
         add_log(f"子文件夹：{subfolder_name}")
     add_log(f"[{archive_path.name}] 找到正式 Excel：{excel_file.name}")
-    if excel_file.stem.startswith("修改"):
-        reason = "文件名前两个字为“修改”"
-        copied_to = skip_excel_file(excel_file, reason, "修改文件跳过")
+    if should_skip_named_file(excel_file):
+        reason = skip_named_file_reason(excel_file)
+        copied_to = skip_excel_file(excel_file, reason, "前缀文件跳过")
         return build_result(False, "跳过", skip=True, reason=reason, ignored=True, copied_to=copied_to)
-
-    reissue_reason = prefixed_reissue_skip_reason_for_names(excel_file.name, archive_path.name, category_keywords)
-    if reissue_reason:
-        copied_to = skip_excel_file(excel_file, reissue_reason, "补发文件跳过")
-        return build_result(False, "跳过", skip=True, reason=reissue_reason, ignored=True, copied_to=copied_to)
 
     rows, workbook_success, category, date_text, header_report_rows = extract_rows_from_workbook(
         excel_file,
         category_keywords,
-        archive_path.name,
+        build_recognition_names(excel_file, extracted_root, unit_folder, archive_path),
     )
     for row in header_report_rows:
         row["压缩包名"] = archive_path.name
@@ -1418,6 +1450,8 @@ def process_excel_unit(
         row["子文件夹名"] = subfolder_name
     if not workbook_success:
         return build_result(False, "异常", skip=True, reason="Excel 读取失败或未识别到任何核心表头")
+    if category == "未分类":
+        copy_unclassified_excel(excel_file, unclassified_dir, dry_run=dry_run)
 
     filename_validation, quantity_error_rows = build_filename_validation(
         archive_path.name,
@@ -1437,6 +1471,7 @@ def process_archive(
     archive_path: Path,
     category_keywords: dict[str, list[str]] | None = None,
     skip_dir: Path | None = None,
+    unclassified_dir: Path | None = None,
     hc_dir: Path | None = None,
     dry_run: bool = False,
     enable_hc_filter: bool = False,
@@ -1508,13 +1543,13 @@ def process_archive(
         }
 
     try:
-        if "修改" in archive_path.name:
-            reason = "压缩包文件名包含“修改”"
+        if should_skip_named_file(archive_path):
+            reason = skip_named_file_reason(archive_path)
             copied_to = copy_skipped_source(archive_path, skip_dir, dry_run=dry_run)
             add_log(f"[{archive_path.name}] 已跳过压缩包：{reason}；已复制到：{copied_to}")
             add_structured_error(
                 archive_path,
-                "修改压缩包跳过",
+                "前缀压缩包跳过",
                 f"{reason}；已复制到：{copied_to}",
                 archive_path.name,
                 status="已跳过",
@@ -1582,6 +1617,7 @@ def process_archive(
                     unit_folder,
                     category_keywords,
                     skip_dir,
+                    unclassified_dir,
                     dry_run,
                     excel_group_mode=excel_group_mode,
                 )
@@ -1623,6 +1659,7 @@ def process_folder_excel_group(
     excel_files: list[Path],
     category_keywords: dict[str, list[str]] | None = None,
     skip_dir: Path | None = None,
+    unclassified_dir: Path | None = None,
     hc_dir: Path | None = None,
     dry_run: bool = False,
     enable_hc_filter: bool = False,
@@ -1684,6 +1721,7 @@ def process_folder_excel_group(
             unit_folder,
             category_keywords,
             skip_dir,
+            unclassified_dir,
             dry_run,
             excel_group_mode=excel_group_mode,
             copy_skipped_excel_file=True,
@@ -1746,6 +1784,14 @@ def style_sheet(ws) -> None:
         ws.column_dimensions[column_letter].width = min(max(max_length + 4, 12), 60)
 
 
+def apply_output_date_format(ws) -> None:
+    date_col = OUTPUT_HEADERS.index("日期") + 1
+    for row_index in range(2, ws.max_row + 1):
+        cell = ws.cell(row=row_index, column=date_col)
+        if isinstance(cell.value, (date, datetime)):
+            cell.number_format = OUTPUT_DATE_NUMBER_FORMAT
+
+
 def apply_sheet_tab_color(ws, index: int) -> None:
     color = SHEET_TAB_COLORS.get(ws.title)
     if not color:
@@ -1794,6 +1840,7 @@ def write_to_output(rows: list[dict[str, Any]], output_path: str | Path, clear: 
     for index, ws in enumerate(workbook.worksheets):
         ensure_sheet_headers(ws)
         style_sheet(ws)
+        apply_output_date_format(ws)
         apply_sheet_tab_color(ws, index)
 
     workbook.save(output)
@@ -1830,6 +1877,8 @@ def build_category_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
 def normalize_cell_for_compare(value: Any) -> str:
     if value is None:
         return ""
+    if isinstance(value, (date, datetime)):
+        return format_output_date_display(value)
     if isinstance(value, bool):
         return str(value).strip()
     if isinstance(value, int):
@@ -1955,7 +2004,7 @@ def detect_duplicates(
                     "亚马逊订单号": row.get("亚马逊订单号", ""),
                     "SKU": row.get("SKU", ""),
                     "数量": row.get("数量", ""),
-                    "日期": row.get("日期", ""),
+                    "日期": format_output_date_display(row.get("日期", "")),
                     "品类": row.get("category", "未分类"),
                     "重复来源": source_label(existing_count > 0, current_count > 1),
                     "处理方式": "仅提示",
@@ -1987,7 +2036,7 @@ def detect_duplicates(
                     "亚马逊订单号": row.get("亚马逊订单号", ""),
                     "SKU": row.get("SKU", ""),
                     "数量": row.get("数量", ""),
-                    "日期": row.get("日期", ""),
+                    "日期": format_output_date_display(row.get("日期", "")),
                     "重复来源": duplicate_source,
                     "处理方式": handling,
                 }
@@ -2066,7 +2115,7 @@ def format_exact_duplicate_logs(exact_duplicate_report_rows: list[dict[str, Any]
     for index, row in enumerate(rows[:100], 1):
         lines.append(
             f"{index}. {row.get('品类', '')} | {row.get('亚马逊订单号', '')} | "
-            f"{row.get('SKU', '')} | {row.get('数量', '')} | {row.get('日期', '')} | "
+            f"{row.get('SKU', '')} | {row.get('数量', '')} | {format_output_date_display(row.get('日期', ''))} | "
             f"{row.get('重复来源', '')} | {row.get('处理方式', '')}"
         )
     if len(rows) > 100:
@@ -2359,10 +2408,29 @@ def copy_skipped_source(source_path: Path, skip_dir: Path | None, dry_run: bool 
     return str(target_path.resolve())
 
 
+def copy_unclassified_excel(source_path: Path, unclassified_dir: Path | None, dry_run: bool = False) -> str:
+    if unclassified_dir is None:
+        return ""
+    if dry_run:
+        target_path = unique_copy_path(unclassified_dir, source_path.name, create_folder=False)
+        add_log(f"dry-run 模式：未分类 Excel 将复制到：{target_path}；来源：{source_path.name}")
+        return str(target_path.resolve())
+    target_path = unique_copy_path(unclassified_dir, source_path.name)
+    shutil.copy2(source_path, target_path)
+    add_log(f"未分类 Excel 已复制到：{target_path}；来源：{source_path.name}")
+    return str(target_path.resolve())
+
+
 def build_skip_dir(input_path: str | Path) -> Path:
     path = Path(input_path).expanduser()
     base = path if path.is_dir() else path.parent
     return base / "未处理压缩包"
+
+
+def build_unclassified_dir(input_path: str | Path) -> Path:
+    path = Path(input_path).expanduser()
+    base = path if path.is_dir() else path.parent
+    return base / UNCLASSIFIED_EXCEL_FOLDER_NAME
 
 
 def build_hc_dir(input_path: str | Path) -> Path:
@@ -2568,7 +2636,8 @@ def build_category_summary_rows(rows: list[dict[str, Any]]) -> list[dict[str, An
 def build_daily_order_summary_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     summary: dict[str, dict[str, Any]] = {}
     for row in rows:
-        date_text = str(row.get("日期") or "未识别日期")
+        raw_date = row.get("日期")
+        date_text = format_output_date_display(raw_date) if raw_date else "未识别日期"
         item = summary.setdefault(
             date_text,
             {"日期": date_text, "明细行数": 0, "订单号": set(), "数量合计": 0.0, "品类": set()},
@@ -2800,6 +2869,7 @@ def run_extract(
     normalized_excel_group_mode = normalize_excel_group_mode(excel_group_mode)
     logs_dir = Path(report_dir).expanduser() if report_dir else get_runtime_base_dir() / "logs"
     skip_dir = build_skip_dir(input_path)
+    unclassified_dir = build_unclassified_dir(input_path)
     hc_dir = build_hc_dir(input_path)
     all_rows: list[dict[str, Any]] = []
     merged_rows: list[dict[str, Any]] = []
@@ -2883,6 +2953,7 @@ def run_extract(
                         archive_path,
                         category_keywords,
                         skip_dir,
+                        unclassified_dir,
                         hc_dir,
                         dry_run,
                         enable_hc_filter,
@@ -2909,6 +2980,7 @@ def run_extract(
                         unit_files,
                         category_keywords,
                         skip_dir,
+                        unclassified_dir,
                         hc_dir,
                         dry_run,
                         enable_hc_filter,
@@ -3016,8 +3088,11 @@ def run_extract(
                 add_log(f"同一订单号下相同 SKU 已合并：{len(all_rows)} 行 -> {len(merged_rows)} 行")
             quantity_error_rows.extend(merge_quantity_error_rows)
             quantity_error_rows = dedupe_quantity_error_rows(quantity_error_rows)
+            classified_rows = [row for row in merged_rows if str(row.get("category") or "未分类") != "未分类"]
+            if len(classified_rows) != len(merged_rows):
+                add_log(f"未分类 Excel 已复制到：{unclassified_dir}；未分类行不写入正式汇总")
             rows_to_write, duplicate_report_rows, exact_duplicate_report_rows = detect_duplicates(
-                merged_rows,
+                classified_rows,
                 output,
                 clear=clear,
                 detect_duplicate_orders=detect_duplicate_orders,
