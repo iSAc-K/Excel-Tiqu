@@ -2955,6 +2955,23 @@ def save_process_report(report_data: dict[str, Any], report_dir: str | Path | No
             ],
         ),
         (
+            "新品类候选",
+            ["序号", "原始名称", "原始候选", "识别前缀", "候选品类", "状态", "Excel文件名", "来源路径"],
+            [
+                {
+                    "序号": index,
+                    "原始名称": row.get("source_name", ""),
+                    "原始候选": row.get("raw_candidate", ""),
+                    "识别前缀": row.get("prefix", ""),
+                    "候选品类": row.get("category", ""),
+                    "状态": row.get("status", "待确认"),
+                    "Excel文件名": row.get("excel_file", ""),
+                    "来源路径": row.get("source_path", ""),
+                }
+                for index, row in enumerate(report_data.get("category_candidates") or [], 1)
+            ],
+        ),
+        (
             "品类汇总",
             ["品类", "写入行数", "订单数", "数量合计", "涉及压缩包数量"],
             build_category_summary_rows(report_data.get("rows_to_write") or []),
@@ -3330,6 +3347,7 @@ def run_extract(
         except Exception as exc:
             add_exception(f"异常：保存处理报告失败，原因：{exc}")
             process_report_file_path = ""
+        stats["process_report_path"] = process_report_file_path
         debug_report_file_path = save_debug_report(debug_logs, logs_dir)
         log_file_path = save_run_log(
             stats,

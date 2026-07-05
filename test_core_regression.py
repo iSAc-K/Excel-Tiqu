@@ -525,6 +525,28 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual(candidates[0]["category"], "\u65b9\u767d\u540d\u7247\u67b6")
         self.assertEqual(candidates[0]["status"], "\u5f85\u786e\u8ba4")
 
+    def test_process_report_contains_new_category_candidate_sheet(self) -> None:
+        folder = self.input_dir / "0607" / "1~2-0605-\u65b9\u767d\u540d\u7247\u67b6-1\u5355-1\u4e2a"
+        folder.mkdir(parents=True)
+        workbook_path = folder / "random-order.xlsx"
+        make_order_workbook(workbook_path, [("ORDER-UNCLASSIFIED", "SKU-UNKNOWN", 1)])
+
+        result = self.run_tool(input_mode="folders")
+
+        report_path = Path(result["stats"]["process_report_path"])
+        workbook = load_workbook(report_path, data_only=True)
+        try:
+            self.assertIn("\u65b0\u54c1\u7c7b\u5019\u9009", workbook.sheetnames)
+            rows = list(workbook["\u65b0\u54c1\u7c7b\u5019\u9009"].iter_rows(values_only=True))
+        finally:
+            workbook.close()
+        self.assertEqual(
+            rows[0][:6],
+            ("\u5e8f\u53f7", "\u539f\u59cb\u540d\u79f0", "\u539f\u59cb\u5019\u9009", "\u8bc6\u522b\u524d\u7f00", "\u5019\u9009\u54c1\u7c7b", "\u72b6\u6001"),
+        )
+        self.assertEqual(rows[1][1], "1~2-0605-\u65b9\u767d\u540d\u7247\u67b6-1\u5355-1\u4e2a")
+        self.assertEqual(rows[1][4], "\u65b9\u767d\u540d\u7247\u67b6")
+
     def test_folder_mode_skips_generated_unclassified_folder_on_later_runs(self) -> None:
         folder = self.input_dir / "0607" / "1~2-0605-\u65b9\u767d\u540d\u7247\u67b6-1\u5355-1\u4e2a"
         folder.mkdir(parents=True)
