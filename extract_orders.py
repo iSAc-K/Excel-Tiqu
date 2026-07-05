@@ -24,6 +24,7 @@ from openpyxl.utils import get_column_letter
 ARCHIVE_EXTENSIONS = {".zip", ".rar", ".7z"}
 EXCEL_EXTENSIONS = {".xlsx", ".xlsm"}
 HC_FOLDER_NAME = "HC"
+UNCLASSIFIED_FOLDER_NAME = "\u672a\u5206\u7c7bExcel"
 INPUT_MODE_ARCHIVES = "archives"
 INPUT_MODE_FOLDERS = "folders"
 INPUT_MODE_MIXED = "mixed"
@@ -540,7 +541,7 @@ def find_folder_excel_files(input_path: str | Path) -> list[Path]:
         return []
 
     add_log(f"开始扫描文件夹里的 Excel：{path}")
-    excluded_folder_names = {HC_FOLDER_NAME, build_skip_dir(path).name}
+    excluded_folder_names = {HC_FOLDER_NAME, build_skip_dir(path).name, UNCLASSIFIED_FOLDER_NAME}
     excel_files: list[Path] = []
     for file_path in sorted(path.rglob("*")):
         if not file_path.is_file():
@@ -730,6 +731,26 @@ def build_excel_processing_groups(extracted_root: Path, excel_files: list[Path])
         if not has_group_inside:
             groups.append((folder, []))
     return sorted(groups, key=lambda item: str(item[0]))
+
+
+def build_recognition_names(excel_file: Path, extracted_root: Path, unit_folder: Path, archive_path: Path) -> list[str]:
+    names: list[str] = []
+    if unit_folder != extracted_root:
+        try:
+            folder_parts = unit_folder.relative_to(extracted_root).parts
+        except ValueError:
+            folder_parts = (unit_folder.name,)
+        names.extend(reversed([part for part in folder_parts if part]))
+    names.extend([archive_path.name, excel_file.name])
+
+    unique_names: list[str] = []
+    seen: set[str] = set()
+    for name in names:
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        unique_names.append(name)
+    return unique_names
 
 
 def normalize_header(value: Any) -> str:
@@ -1214,33 +1235,42 @@ def normalize_quantity(value: Any, excel_name: str, row_index: int) -> Any:
 def extract_rows_from_workbook(
     file_path: Path,
     category_keywords: dict[str, list[str]] | None = None,
-    fallback_filename: str = "",
+    fallback_filename: str | list[str] = "",
     category_prefixes: list[str] | None = None,
 ) -> tuple[list[dict[str, Any]], bool, str, str, list[dict[str, Any]], dict[str, str] | None]:
     """
     从单个 Excel 文件中提取数据。
     """
+    if isinstance(fallback_filename, list):
+        fallback_filenames = [name for name in fallback_filename if name and name != file_path.name]
+    else:
+        fallback_filenames = [fallback_filename] if fallback_filename and fallback_filename != file_path.name else []
+
     date_text = parse_date_from_filename(file_path.name)
-    if not date_text and fallback_filename and fallback_filename != file_path.name:
-        fallback_date = parse_date_from_filename(fallback_filename)
-        if fallback_date:
-            add_log(f"Excel 文件名未识别到日期，改用外层名称识别：{fallback_filename}")
-            date_text = fallback_date
+    if not date_text:
+        for fallback_name in fallback_filenames:
+            fallback_date = parse_date_from_filename(fallback_name)
+            if fallback_date:
+                add_log(f"Excel 文件名未识别到日期，改用外层名称识别：{fallback_name}")
+                date_text = fallback_date
+                break
     if date_text:
         add_log(f"识别日期：{date_text}")
     else:
         add_log(f"未识别到日期：{file_path.name}，日期列留空")
 
     category = detect_category_from_filename(file_path.name, category_keywords)
-    if category == "未分类" and fallback_filename and fallback_filename != file_path.name:
-        fallback_category = detect_category_from_filename(fallback_filename, category_keywords)
-        if fallback_category != "未分类":
-            add_log(f"Excel 文件名未命中品类，改用外层名称识别：{fallback_filename}")
-            category = fallback_category
+    if category == "未分类":
+        for fallback_name in fallback_filenames:
+            fallback_category = detect_category_from_filename(fallback_name, category_keywords)
+            if fallback_category != "未分类":
+                add_log(f"Excel 文件名未命中品类，改用外层名称识别：{fallback_name}")
+                category = fallback_category
+                break
     add_log(f"识别品类：{category}")
     category_candidate = None
     if category == "未分类":
-        candidate_names = [fallback_filename, file_path.name] if fallback_filename and fallback_filename != file_path.name else [file_path.name]
+        candidate_names = [*fallback_filenames, file_path.name]
         category_candidate = first_category_candidate_from_names(candidate_names, category_prefixes or [])
         if category_candidate and not any(not char.isascii() for char in category_candidate.get("category", "")):
             category_candidate = None
@@ -1511,6 +1541,7 @@ def process_excel_unit(
             if subfolder_name:
                 add_log(f"子文件夹：{subfolder_name}")
             add_log(f"[{archive_path.name}] 找到正式 Excel：{excel_file.name}")
+            recognition_names = build_recognition_names(excel_file, extracted_root, unit_folder, archive_path)
             if excel_file.stem.startswith("修改"):
                 reason = "文件名前两个字为“修改”"
                 skipped_reasons.append(reason)
@@ -1526,7 +1557,7 @@ def process_excel_unit(
             extracted_rows, workbook_success, current_category, current_date_text, current_header_rows, current_category_candidate = extract_rows_from_workbook(
                 excel_file,
                 category_keywords,
-                archive_path.name,
+                recognition_names,
                 category_prefixes,
             )
             record_category_candidate(current_category_candidate, excel_file)
@@ -1570,6 +1601,7 @@ def process_excel_unit(
     if subfolder_name:
         add_log(f"子文件夹：{subfolder_name}")
     add_log(f"[{archive_path.name}] 找到正式 Excel：{excel_file.name}")
+    recognition_names = build_recognition_names(excel_file, extracted_root, unit_folder, archive_path)
     if excel_file.stem.startswith("修改"):
         reason = "文件名前两个字为“修改”"
         copied_to = skip_excel_file(excel_file, reason, "修改文件跳过")
@@ -1583,7 +1615,7 @@ def process_excel_unit(
     rows, workbook_success, category, date_text, header_report_rows, category_candidate = extract_rows_from_workbook(
         excel_file,
         category_keywords,
-        archive_path.name,
+        recognition_names,
         category_prefixes,
     )
     record_category_candidate(category_candidate, excel_file)
@@ -2557,7 +2589,7 @@ def build_skip_dir(input_path: str | Path) -> Path:
 def build_unclassified_dir(input_path: str | Path) -> Path:
     path = Path(input_path).expanduser()
     base = path if path.is_dir() else path.parent
-    return base / "未分类Excel"
+    return base / UNCLASSIFIED_FOLDER_NAME
 
 
 def build_hc_dir(input_path: str | Path) -> Path:

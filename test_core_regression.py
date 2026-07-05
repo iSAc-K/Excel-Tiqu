@@ -441,6 +441,26 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual([row["order_id"] for row in rows], ["ORDER-SUB-1", "ORDER-SUB-2"])
         self.assertTrue(Path(result["process_report_path"]).exists())
 
+    def test_archive_multi_subfolder_candidate_uses_subfolder_name(self) -> None:
+        workbook_path = self.work_dir / "order.xlsx"
+        make_order_workbook(workbook_path, [("ORDER-ARCHIVE-CANDIDATE", "SKU-UNKNOWN", 1)])
+        subfolder_name = "1~2-0605-\u65b9\u767d\u540d\u7247\u67b6-1\u5355-1\u4e2a"
+        make_zip(
+            self.input_dir / "multi_subfolder_candidate.zip",
+            [(workbook_path, f"{subfolder_name}/{workbook_path.name}")],
+        )
+
+        result = self.run_tool()
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["total_rows"], 1)
+        self.assertEqual(result["written_rows"], 0)
+        self.assertFalse(self.output_path.exists())
+        candidates = result["category_candidates"]
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["source_name"], subfolder_name)
+        self.assertEqual(candidates[0]["category"], "\u65b9\u767d\u540d\u7247\u67b6")
+
     def test_archive_name_is_used_when_excel_filename_has_no_category_or_date(self) -> None:
         workbook_path = self.work_dir / "order.xlsx"
         make_order_workbook(workbook_path, [("ORDER-ARCHIVE-FALLBACK", "SKU-WING", 10)])
@@ -504,6 +524,25 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual(candidates[0]["raw_candidate"], "\u65b9\u767d\u540d\u7247\u67b6")
         self.assertEqual(candidates[0]["category"], "\u65b9\u767d\u540d\u7247\u67b6")
         self.assertEqual(candidates[0]["status"], "\u5f85\u786e\u8ba4")
+
+    def test_folder_mode_skips_generated_unclassified_folder_on_later_runs(self) -> None:
+        folder = self.input_dir / "0607" / "1~2-0605-\u65b9\u767d\u540d\u7247\u67b6-1\u5355-1\u4e2a"
+        folder.mkdir(parents=True)
+        workbook_path = folder / "random-order.xlsx"
+        make_order_workbook(workbook_path, [("ORDER-UNCLASSIFIED-RERUN", "SKU-UNKNOWN", 1)])
+
+        first_result = self.run_tool(input_mode="folders")
+
+        self.assertTrue(first_result["success"])
+        self.assertEqual(first_result["total_rows"], 1)
+        self.assertEqual(len(first_result["category_candidates"]), 1)
+        self.assertTrue((self.input_dir / UNCLASSIFIED_FOLDER_NAME / workbook_path.name).exists())
+
+        second_result = self.run_tool(input_mode="folders")
+
+        self.assertTrue(second_result["success"])
+        self.assertEqual(second_result["total_rows"], 1)
+        self.assertEqual(len(second_result["category_candidates"]), 1)
 
     def test_folder_name_is_used_when_excel_filename_has_no_category_or_date(self) -> None:
         folder = self.input_dir / f"13-1216-HC-{SILVER_WING_IMAGE_NECKLACE}-9\u5355-10\u4ef6"
