@@ -518,7 +518,7 @@ class NewCategoryCandidatesWindow(ctk.CTkToplevel):
         self.minsize(820, 500)
         self.transient(master)
         self.config_path = config_path
-        self.candidates = [dict(candidate) for candidate in candidates]
+        self.candidates = candidates
         self.current_index: int | None = None
         self.prefix_var = tk.StringVar(value="")
         self.category_var = tk.StringVar(value="")
@@ -1111,7 +1111,7 @@ class ExtractOrdersApp(ctk.CTk):
         CategoryConfigWindow(self, category_config_path())
 
     def open_category_candidates(self) -> None:
-        candidates = list((self.last_result or {}).get("category_candidates") or [])
+        candidates = (self.last_result or {}).get("category_candidates") or []
         if not candidates:
             messagebox.showinfo("新品类候选", "当前没有可确认的新品类候选。请先运行一次提取。", parent=self)
             return
