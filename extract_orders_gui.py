@@ -44,7 +44,7 @@ from excel_update_core import (
     can_close_update_window,
     read_version,
 )
-from update_manager import DownloadProgress, UpdateCancelled, download_update, fetch_update_info_with_retry, is_newer_version
+from update_manager import DownloadProgress, UpdateCancelled, UpdateInfo, download_update, fetch_update_info_with_retry, is_newer_version
 
 
 DEFAULT_OUTPUT_NAME = "订单汇总.xlsx"
@@ -759,7 +759,7 @@ class ExtractOrdersApp(ctk.CTk):
         self.update_cancel_event: threading.Event | None = None
         self.update_queue: queue.Queue[tuple[str, object]] = queue.Queue()
         self.update_worker_thread: threading.Thread | None = None
-        self.update_info: object | None = None
+        self.update_info: UpdateInfo | None = None
 
         self._build_ui()
         self.ensure_default_category_config()
