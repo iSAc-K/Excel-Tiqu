@@ -47,12 +47,9 @@ def _version_tuple(version: str) -> tuple[int, ...]:
     text = version.strip()
     if text[:1].lower() == "v":
         text = text[1:]
-    parts: list[int] = []
-    for part in text.split("."):
-        if not part.isdigit():
-            break
-        parts.append(int(part))
-    return tuple(parts)
+    if re.fullmatch(r"\d+(?:\.\d+)*", text) is None:
+        raise ValueError(f"invalid version: {version!r}")
+    return tuple(int(part) for part in text.split("."))
 
 
 def is_newer_version(latest_version: str, current_version: str) -> bool:
@@ -91,6 +88,7 @@ def parse_update_manifest(manifest: object) -> UpdateInfo:
     if not isinstance(sha256, str):
         raise ValueError("sha256 is required")
 
+    _version_tuple(version)
     _validate_download_url(download_url)
     _validate_sha256(sha256)
 
@@ -137,6 +135,8 @@ def fetch_update_info_with_retry(
     for attempt in range(attempts):
         try:
             return fetch()
+        except ValueError:
+            raise
         except Exception as error:
             last_error = error
             if attempt == attempts - 1:

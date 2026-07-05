@@ -75,6 +75,10 @@ class UpdateManagerTests(unittest.TestCase):
             parse_update_manifest({"version": "2.2", "download_url": "https://example.com/app.exe", "sha256": "a" * 64})
         with self.assertRaises(ValueError):
             parse_update_manifest({"version": "2.2", "download_url": "https://example.com/app.zip", "sha256": "bad"})
+        with self.assertRaises(ValueError):
+            parse_update_manifest(
+                {"version": "not-a-version", "download_url": "https://example.com/app.zip", "sha256": "a" * 64}
+            )
 
     def test_fetch_update_info_decodes_utf8_sig(self) -> None:
         payload = b"\xef\xbb\xbf" + json.dumps(
@@ -111,6 +115,23 @@ class UpdateManagerTests(unittest.TestCase):
 
         self.assertEqual(result, expected)
         self.assertEqual(sleeps, [0.25, 0.25])
+
+    def test_fetch_update_info_does_not_retry_manifest_validation_errors(self) -> None:
+        calls: list[int] = []
+
+        def fetcher() -> UpdateInfo:
+            calls.append(1)
+            raise ValueError("bad manifest")
+
+        with self.assertRaisesRegex(ValueError, "bad manifest"):
+            fetch_update_info_with_retry(
+                attempts=3,
+                retry_delay=0.25,
+                fetcher=fetcher,
+                sleeper=lambda _delay: None,
+            )
+
+        self.assertEqual(calls, [1])
 
     def test_verify_sha256(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
