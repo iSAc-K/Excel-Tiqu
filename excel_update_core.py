@@ -56,12 +56,12 @@ def format_byte_count(byte_count: int | float) -> str:
     if byte_count < 1024:
         return f"{round(byte_count):.0f} B"
 
-    kb_count = byte_count / 1024
-    if kb_count < 1024:
-        return f"{kb_count:.1f} KB"
-
-    mb_count = kb_count / 1024
-    return f"{mb_count:.1f} MB"
+    units = ("KB", "MB", "GB", "TB")
+    value = byte_count / 1024
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            return f"{value:.1f} {unit}"
+        value /= 1024
 
 
 def format_download_speed(bytes_per_second: int | float) -> str:
@@ -89,7 +89,7 @@ def build_update_progress_text(progress: object) -> DownloadDisplayText:
     speed = format_download_speed(average_bytes_per_second)
     remaining = format_remaining_time(estimated_seconds_remaining)
 
-    if not total_bytes:
+    if total_bytes is None or total_bytes <= 0:
         return DownloadDisplayText(
             downloaded=format_byte_count(downloaded_bytes),
             speed=speed,

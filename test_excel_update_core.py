@@ -46,6 +46,8 @@ class ExcelUpdateCoreTests(unittest.TestCase):
         self.assertEqual(format_byte_count(12), "12 B")
         self.assertEqual(format_byte_count(1536), "1.5 KB")
         self.assertEqual(format_byte_count(2 * 1024 * 1024), "2.0 MB")
+        self.assertEqual(format_byte_count(3 * 1024 * 1024 * 1024), "3.0 GB")
+        self.assertEqual(format_byte_count(4 * 1024 * 1024 * 1024 * 1024), "4.0 TB")
 
     def test_format_remaining_time(self) -> None:
         self.assertEqual(format_remaining_time(None), "Calculating")
@@ -73,6 +75,15 @@ class ExcelUpdateCoreTests(unittest.TestCase):
         self.assertEqual(text.downloaded, "5 B")
         self.assertEqual(text.percent, "Downloading")
         self.assertTrue(text.indeterminate)
+
+    def test_build_progress_text_for_nonpositive_total(self) -> None:
+        zero_total = build_update_progress_text(FakeProgress(5, 0, 2.5, None))
+        negative_total = build_update_progress_text(FakeProgress(5, -1, 2.5, None))
+
+        self.assertEqual(zero_total.percent, "Downloading")
+        self.assertTrue(zero_total.indeterminate)
+        self.assertEqual(negative_total.percent, "Downloading")
+        self.assertTrue(negative_total.indeterminate)
 
     def test_status_texts_include_versions_and_errors(self) -> None:
         self.assertIn("Checking", build_update_status_text("checking", "2.1"))
