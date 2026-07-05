@@ -7,6 +7,7 @@ import shutil
 import ssl
 import tempfile
 import time
+import urllib.error
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event
@@ -137,7 +138,7 @@ def fetch_update_info_with_retry(
             return fetch()
         except ValueError:
             raise
-        except Exception as error:
+        except (TimeoutError, ConnectionError, urllib.error.URLError) as error:
             last_error = error
             if attempt == attempts - 1:
                 break
