@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import os
 import queue
+import shutil
 import site
+import subprocess
 import sys
 import threading
 import traceback
@@ -33,6 +35,16 @@ def add_dependency_paths() -> None:
 add_dependency_paths()
 
 import customtkinter as ctk
+
+from excel_update_core import (
+    UpdateStatus,
+    build_update_progress_text,
+    build_update_status_text,
+    can_cancel_update,
+    can_close_update_window,
+    read_version,
+)
+from update_manager import DownloadProgress, UpdateCancelled, download_update, fetch_update_info_with_retry, is_newer_version
 
 
 DEFAULT_OUTPUT_NAME = "订单汇总.xlsx"
@@ -733,6 +745,21 @@ class ExtractOrdersApp(ctk.CTk):
         self.pages: dict[str, ctk.CTkFrame] = {}
         self.report_buttons: dict[str, ctk.CTkButton] = {}
         self.start_controls: list[Any] = []
+        self.current_version = read_version(runtime_base_dir()) or "2.1"
+        self.update_window: ctk.CTkToplevel | None = None
+        self.update_status_label: ctk.CTkLabel | None = None
+        self.update_action_button: ctk.CTkButton | None = None
+        self.update_progress_bar: ctk.CTkProgressBar | None = None
+        self.update_percent_label: ctk.CTkLabel | None = None
+        self.update_downloaded_label: ctk.CTkLabel | None = None
+        self.update_speed_label: ctk.CTkLabel | None = None
+        self.update_remaining_label: ctk.CTkLabel | None = None
+        self.update_status: UpdateStatus = "latest"
+        self.update_latest_version = ""
+        self.update_cancel_event: threading.Event | None = None
+        self.update_queue: queue.Queue[tuple[str, object]] = queue.Queue()
+        self.update_worker_thread: threading.Thread | None = None
+        self.update_info: object | None = None
 
         self._build_ui()
         self.ensure_default_category_config()
@@ -976,6 +1003,14 @@ class ExtractOrdersApp(ctk.CTk):
             self.report_buttons[key] = button
         self.export_errors_button = ctk.CTkButton(button_row, text="导出异常列表", width=116, fg_color="#4b5563", command=self.export_error_report)
         self.export_errors_button.grid(row=0, column=len(specs), sticky="w")
+        self.update_button = ctk.CTkButton(
+            actions,
+            text="Software Update",
+            width=128,
+            fg_color="#2563eb",
+            command=self.open_update_window,
+        )
+        self.update_button.grid(row=2, column=4, sticky="e", padx=(8, 18), pady=(0, 16))
 
         body = ctk.CTkFrame(page, fg_color="transparent")
         body.grid(row=1, column=0, sticky="nsew")
@@ -1476,6 +1511,134 @@ class ExtractOrdersApp(ctk.CTk):
             return
         output_folder = Path(output_path).expanduser().parent
         self.open_path(str(output_folder), "输出文件夹不存在")
+
+    def is_extract_running(self) -> bool:
+        return bool(self.worker_thread and self.worker_thread.is_alive())
+
+    def open_update_window(self) -> None:
+        if self.update_window is not None and self.update_window.winfo_exists():
+            self.update_window.lift()
+            self.update_window.focus_force()
+            return
+        window = ctk.CTkToplevel(self)
+        self.update_window = window
+        window.title("Software Update")
+        window.geometry("560x440")
+        window.resizable(False, False)
+        window.transient(self)
+        window.protocol("WM_DELETE_WINDOW", self.close_update_window)
+        window.grid_columnconfigure(0, weight=1)
+
+        self.update_status_label = ctk.CTkLabel(
+            window,
+            text=build_update_status_text("latest", self.current_version),
+            justify="left",
+            anchor="w",
+            wraplength=500,
+        )
+        self.update_status_label.grid(row=0, column=0, sticky="ew", padx=24, pady=(24, 14))
+
+        self.update_progress_bar = ctk.CTkProgressBar(window, width=420)
+        self.update_progress_bar.grid(row=1, column=0, sticky="ew", padx=24, pady=(0, 8))
+        self.update_progress_bar.set(0)
+
+        self.update_percent_label = ctk.CTkLabel(window, text="0%")
+        self.update_percent_label.grid(row=2, column=0, sticky="w", padx=24)
+
+        metrics = ctk.CTkFrame(window, fg_color="transparent")
+        metrics.grid(row=3, column=0, sticky="ew", padx=24, pady=(8, 16))
+        metrics.grid_columnconfigure((0, 1, 2), weight=1)
+        self.update_downloaded_label = ctk.CTkLabel(metrics, text="Downloaded: 0 B")
+        self.update_downloaded_label.grid(row=0, column=0, sticky="w")
+        self.update_speed_label = ctk.CTkLabel(metrics, text="Speed: 0 B/s")
+        self.update_speed_label.grid(row=0, column=1, sticky="w")
+        self.update_remaining_label = ctk.CTkLabel(metrics, text="Remaining: Calculating")
+        self.update_remaining_label.grid(row=0, column=2, sticky="w")
+
+        self.update_action_button = ctk.CTkButton(
+            window,
+            text="Check Again",
+            command=self.start_manual_update_check,
+        )
+        self.update_action_button.grid(row=4, column=0, sticky="ew", padx=80, pady=(6, 24))
+        self.render_update_state(self.update_status, self.update_latest_version)
+        self.start_manual_update_check()
+
+    def close_update_window(self) -> None:
+        if not can_close_update_window(self.update_status):
+            if self.update_window is not None and self.update_window.winfo_exists():
+                self.update_window.lift()
+                self.update_window.focus_force()
+            return
+        if self.update_window is not None:
+            self.update_window.destroy()
+        self.update_window = None
+
+    def start_manual_update_check(self) -> None:
+        self.render_update_state("checking")
+        self.after(100, lambda: self.render_update_state("latest", self.current_version))
+
+    def render_update_state(
+        self,
+        status: UpdateStatus,
+        latest_version: str = "",
+        notes: list[str] | None = None,
+        error: str = "",
+    ) -> None:
+        self.update_status = status
+        if latest_version:
+            self.update_latest_version = latest_version
+        if self.update_status_label is not None:
+            self.update_status_label.configure(
+                text=build_update_status_text(
+                    status,
+                    self.current_version,
+                    self.update_latest_version,
+                    notes,
+                    error,
+                )
+            )
+        if self.update_action_button is None:
+            return
+        if status == "checking":
+            self.update_action_button.configure(text="Checking...", state=tk.DISABLED, command=lambda: None)
+        elif status == "available":
+            self.update_action_button.configure(text="Update Now", state=tk.NORMAL, command=self.start_update_download)
+        elif can_cancel_update(status):
+            self.update_action_button.configure(text="Stop Update", state=tk.NORMAL, command=self.stop_update_download)
+        elif status in {"preparing_install", "updater_started"}:
+            self.update_action_button.configure(text="Installing...", state=tk.DISABLED, command=lambda: None)
+        else:
+            self.update_action_button.configure(text="Check Again", state=tk.NORMAL, command=self.start_manual_update_check)
+
+    def render_update_progress(self, progress: DownloadProgress) -> None:
+        text = build_update_progress_text(progress)
+        if progress.phase == "downloading" and self.update_status != "downloading":
+            self.render_update_state("downloading", self.update_latest_version)
+        elif progress.phase in {"verifying", "verified"} and self.update_status == "downloading":
+            self.render_update_state("verifying", self.update_latest_version)
+        if self.update_progress_bar is not None:
+            self.update_progress_bar.stop()
+            self.update_progress_bar.configure(mode="indeterminate" if text.indeterminate else "determinate")
+            if text.indeterminate:
+                self.update_progress_bar.start()
+            else:
+                self.update_progress_bar.set(text.value)
+        if self.update_percent_label is not None:
+            self.update_percent_label.configure(text=text.percent)
+        if self.update_downloaded_label is not None:
+            self.update_downloaded_label.configure(text=f"Downloaded: {text.downloaded}")
+        if self.update_speed_label is not None:
+            self.update_speed_label.configure(text=f"Speed: {text.speed}")
+        if self.update_remaining_label is not None:
+            self.update_remaining_label.configure(text=f"Remaining: {text.remaining}")
+
+    def start_update_download(self) -> None:
+        messagebox.showinfo("Software Update", "Update download will be available after the update flow is enabled.", parent=self)
+
+    def stop_update_download(self) -> None:
+        if self.update_cancel_event is not None:
+            self.update_cancel_event.set()
 
     def open_path(self, path_text: str, missing_message: str) -> None:
         if not path_text:
