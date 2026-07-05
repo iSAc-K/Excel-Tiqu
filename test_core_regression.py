@@ -579,6 +579,37 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual(candidates[0]["source_name"], subfolder_name)
         self.assertEqual(candidates[0]["category"], "\u65b9\u767d\u540d\u7247\u67b6")
 
+    def test_archive_candidate_exclusion_keeps_same_basename_classified_subfolder(self) -> None:
+        candidate_dir = self.work_dir / "candidate"
+        candidate_dir.mkdir()
+        candidate_workbook = candidate_dir / "order.xlsx"
+        make_order_workbook(candidate_workbook, [("ORDER-CANDIDATE", "SKU-CANDIDATE", 1)])
+        classified_dir = self.work_dir / "classified"
+        classified_dir.mkdir()
+        classified_workbook = classified_dir / "order.xlsx"
+        make_order_workbook(classified_workbook, [("ORDER-CLASSIFIED", "SKU-CLASSIFIED", 1)])
+        candidate_subfolder = "1~2-0605-\u65b9\u767d\u540d\u7247\u67b6-1\u5355-1\u4e2a"
+        classified_subfolder = f"3~4-0605-{SILVER_WING_IMAGE_NECKLACE}-1\u5355-1\u4e2a"
+        make_zip(
+            self.input_dir / "same_basename_mixed_candidates.zip",
+            [
+                (candidate_workbook, f"{candidate_subfolder}/{candidate_workbook.name}"),
+                (classified_workbook, f"{classified_subfolder}/{classified_workbook.name}"),
+            ],
+        )
+
+        result = self.run_tool()
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["total_rows"], 2)
+        self.assertEqual(len(result["category_candidates"]), 1)
+        self.assertEqual(result["written_rows"], 1)
+        self.assertTrue(self.output_path.exists())
+        rows = read_summary_rows(self.output_path)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["order_id"], "ORDER-CLASSIFIED")
+        self.assertEqual(rows[0]["sheet"], WING_IMAGE_NECKLACE)
+
     def test_archive_name_is_used_when_excel_filename_has_no_category_or_date(self) -> None:
         workbook_path = self.work_dir / "order.xlsx"
         make_order_workbook(workbook_path, [("ORDER-ARCHIVE-FALLBACK", "SKU-WING", 10)])

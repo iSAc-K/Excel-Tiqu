@@ -1601,6 +1601,7 @@ def process_excel_unit(
             for row in extracted_rows:
                 row["外层压缩包名"] = archive_path.name
                 row["子文件夹名"] = subfolder_name
+                row["source_path"] = str(excel_file)
             if not workbook_success:
                 continue
 
@@ -1658,6 +1659,7 @@ def process_excel_unit(
     for row in rows:
         row["外层压缩包名"] = archive_path.name
         row["子文件夹名"] = subfolder_name
+        row["source_path"] = str(excel_file)
     if not workbook_success:
         return build_result(False, "异常", skip=True, reason="Excel 读取失败或未识别到任何核心表头")
 
@@ -3298,13 +3300,20 @@ def run_extract(
             stats["hc_file_count"] = len(hc_report_rows)
             stats["hc_copy_failed_count"] = sum(1 for row in hc_report_rows if row.get("处理状态") == "复制失败，已排除")
             stats["category_counts"] = build_category_counts(all_rows)
-            candidate_row_keys = {
-                (candidate.get("archive_name", ""), candidate.get("excel_file", ""))
-                for candidate in category_candidates
-            }
+            def candidate_exclusion_key(row: dict[str, Any]) -> tuple[str, str] | tuple[str, str, str]:
+                source_path = str(row.get("source_path") or "")
+                if source_path:
+                    return ("source_path", os.path.normcase(os.path.abspath(source_path)))
+                return (
+                    "archive_excel",
+                    str(row.get("archive_name") or row.get("压缩包名") or ""),
+                    str(row.get("excel_file") or row.get("Excel 文件名") or ""),
+                )
+
+            candidate_row_keys = {candidate_exclusion_key(candidate) for candidate in category_candidates}
             writable_source_rows = [
                 row for row in all_rows
-                if (str(row.get("压缩包名") or ""), str(row.get("Excel 文件名") or "")) not in candidate_row_keys
+                if candidate_exclusion_key(row) not in candidate_row_keys
             ]
             merged_rows, merge_quantity_error_rows = consolidate_order_sku_rows(writable_source_rows)
             if len(merged_rows) != len(writable_source_rows):
