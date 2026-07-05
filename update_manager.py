@@ -122,6 +122,10 @@ def fetch_update_info(url: str = UPDATE_MANIFEST_URL, timeout: float = 10.0) -> 
     return parse_update_manifest(manifest)
 
 
+def _is_transient_http_error(error: urllib.error.HTTPError) -> bool:
+    return error.code in (408, 429) or 500 <= error.code <= 599
+
+
 def fetch_update_info_with_retry(
     attempts: int = 3,
     retry_delay: float = 1.0,
@@ -138,6 +142,13 @@ def fetch_update_info_with_retry(
             return fetch()
         except ValueError:
             raise
+        except urllib.error.HTTPError as error:
+            if not _is_transient_http_error(error):
+                raise
+            last_error = error
+            if attempt == attempts - 1:
+                break
+            sleeper(retry_delay)
         except (TimeoutError, ConnectionError, urllib.error.URLError) as error:
             last_error = error
             if attempt == attempts - 1:

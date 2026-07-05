@@ -6,6 +6,7 @@ import json
 import tempfile
 import threading
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
@@ -48,6 +49,12 @@ class ControlledClock:
     def __call__(self) -> float:
         self.last = next(self.values, self.last)
         return self.last
+
+
+def make_http_error(code: int, message: str) -> urllib.error.HTTPError:
+    error = urllib.error.HTTPError("https://example.com/update.json", code, message, {}, io.BytesIO())
+    error.close()
+    return error
 
 
 class UpdateManagerTests(unittest.TestCase):
@@ -114,6 +121,46 @@ class UpdateManagerTests(unittest.TestCase):
         )
 
         self.assertEqual(result, expected)
+        self.assertEqual(sleeps, [0.25, 0.25])
+
+    def test_fetch_update_info_does_not_retry_nontransient_http_error(self) -> None:
+        calls: list[int] = []
+
+        def fetcher() -> UpdateInfo:
+            calls.append(1)
+            raise make_http_error(404, "Not Found")
+
+        with self.assertRaises(urllib.error.HTTPError) as context:
+            fetch_update_info_with_retry(
+                attempts=3,
+                retry_delay=0.25,
+                fetcher=fetcher,
+                sleeper=lambda _delay: None,
+            )
+
+        self.assertEqual(context.exception.code, 404)
+        self.assertEqual(calls, [1])
+
+    def test_fetch_update_info_retries_transient_http_error_then_succeeds(self) -> None:
+        calls: list[int] = []
+        sleeps: list[float] = []
+        expected = UpdateInfo("2.4", "https://example.com/app.zip", "a" * 64, [])
+
+        def fetcher() -> UpdateInfo:
+            calls.append(1)
+            if len(calls) < 3:
+                raise make_http_error(503, "Unavailable")
+            return expected
+
+        result = fetch_update_info_with_retry(
+            attempts=3,
+            retry_delay=0.25,
+            fetcher=fetcher,
+            sleeper=sleeps.append,
+        )
+
+        self.assertEqual(result, expected)
+        self.assertEqual(calls, [1, 1, 1])
         self.assertEqual(sleeps, [0.25, 0.25])
 
     def test_fetch_update_info_does_not_retry_manifest_validation_errors(self) -> None:
