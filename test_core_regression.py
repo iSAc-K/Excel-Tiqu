@@ -215,6 +215,17 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual(config_data.categories, {"categories": ["category keyword"]})
         self.assertEqual(config_data.prefixes, [])
 
+    def test_default_config_recognizes_plain_wing_image_necklace_name(self) -> None:
+        from extract_orders import copy_default_category_keywords, detect_category_from_filename
+
+        self.assertEqual(
+            detect_category_from_filename(
+                f"0601-PJY-{WING_IMAGE_NECKLACE}-1\u5355-1\u4e2a.xlsx",
+                copy_default_category_keywords(),
+            ),
+            WING_IMAGE_NECKLACE,
+        )
+
     def test_load_structured_category_config_reads_prefixes(self) -> None:
         self.category_config_path.write_text(
             json.dumps(
