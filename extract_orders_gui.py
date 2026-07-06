@@ -1573,10 +1573,21 @@ class ExtractOrdersApp(ctk.CTk):
         if self.update_window is not None:
             self.update_window.destroy()
         self.update_window = None
+        self.update_status_label = None
+        self.update_action_button = None
+        self.update_progress_bar = None
+        self.update_percent_label = None
+        self.update_downloaded_label = None
+        self.update_speed_label = None
+        self.update_remaining_label = None
 
     def start_manual_update_check(self) -> None:
         self.render_update_state("checking")
-        self.after(100, lambda: self.render_update_state("latest", self.current_version))
+        self.after(100, self.finish_update_check_stub)
+
+    def finish_update_check_stub(self) -> None:
+        if self.update_window is not None and self.update_window.winfo_exists():
+            self.render_update_state("latest", self.current_version)
 
     def render_update_state(
         self,
