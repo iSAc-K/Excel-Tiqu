@@ -766,6 +766,7 @@ class ExtractOrdersApp(ctk.CTk):
         self.update_top_status()
         self.switch_page(self.selected_page)
         self.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.after(1200, self.check_for_updates_async)
 
     def _build_ui(self) -> None:
         self.configure(fg_color="#eef2f6")
@@ -1211,6 +1212,9 @@ class ExtractOrdersApp(ctk.CTk):
         return workers
 
     def start_extract(self) -> None:
+        if self.update_status in {"downloading", "verifying", "preparing_install", "updater_started"}:
+            messagebox.showwarning("Software Update", "The app is updating. Please wait for the update to finish.", parent=self)
+            return
         valid, input_path, output_path = self.validate_inputs()
         if not valid:
             return
@@ -1515,7 +1519,7 @@ class ExtractOrdersApp(ctk.CTk):
     def is_extract_running(self) -> bool:
         return bool(self.worker_thread and self.worker_thread.is_alive())
 
-    def open_update_window(self) -> None:
+    def open_update_window(self, start_check: bool = True) -> None:
         if self.update_window is not None and self.update_window.winfo_exists():
             self.update_window.lift()
             self.update_window.focus_force()
@@ -1562,7 +1566,8 @@ class ExtractOrdersApp(ctk.CTk):
         )
         self.update_action_button.grid(row=4, column=0, sticky="ew", padx=80, pady=(6, 24))
         self.render_update_state(self.update_status, self.update_latest_version)
-        self.start_manual_update_check()
+        if start_check:
+            self.start_manual_update_check()
 
     def close_update_window(self) -> None:
         if not can_close_update_window(self.update_status):
@@ -1582,12 +1587,56 @@ class ExtractOrdersApp(ctk.CTk):
         self.update_remaining_label = None
 
     def start_manual_update_check(self) -> None:
+        if self.update_status in {"downloading", "verifying", "preparing_install", "updater_started"}:
+            return
         self.render_update_state("checking")
-        self.after(100, self.finish_update_check_stub)
+        self.check_for_updates_async()
 
-    def finish_update_check_stub(self) -> None:
-        if self.update_window is not None and self.update_window.winfo_exists():
-            self.render_update_state("latest", self.current_version)
+    def check_for_updates_async(self) -> None:
+        threading.Thread(target=self._check_for_updates_worker, daemon=True).start()
+
+    def _check_for_updates_worker(self) -> None:
+        try:
+            info = fetch_update_info_with_retry()
+        except Exception as exc:
+            self.update_queue.put(("check_failed", str(exc)))
+        else:
+            self.update_queue.put(("check_done", info))
+        self.after(100, self.poll_update_queue)
+
+    def poll_update_queue(self) -> None:
+        while True:
+            try:
+                kind, payload = self.update_queue.get_nowait()
+            except queue.Empty:
+                break
+            if kind == "check_done" and isinstance(payload, UpdateInfo):
+                latest_version = payload.version
+                if is_newer_version(latest_version, self.current_version):
+                    self.update_info = payload
+                    self.render_update_state("available", latest_version, payload.notes)
+                    if self.update_window is None or not self.update_window.winfo_exists():
+                        self.open_update_window(start_check=False)
+                elif self.update_window is not None and self.update_window.winfo_exists():
+                    self.render_update_state("latest", latest_version)
+            elif kind == "check_failed":
+                if self.update_window is not None and self.update_window.winfo_exists():
+                    self.render_update_state("failed", error=str(payload))
+            elif kind == "progress" and isinstance(payload, DownloadProgress):
+                self.render_update_progress(payload)
+            elif kind == "downloaded":
+                package, latest_version = payload  # type: ignore[misc]
+                self.prepare_install_update(Path(package), str(latest_version))
+            elif kind == "cancelled":
+                self.set_running_state(False)
+                self.update_cancel_event = None
+                self.render_update_state("cancelled", self.update_latest_version)
+            elif kind == "failed":
+                self.set_running_state(False)
+                self.update_cancel_event = None
+                self.render_update_state("failed", self.update_latest_version, error=str(payload))
+        if self.update_worker_thread and self.update_worker_thread.is_alive():
+            self.after(100, self.poll_update_queue)
 
     def render_update_state(
         self,
@@ -1645,11 +1694,73 @@ class ExtractOrdersApp(ctk.CTk):
             self.update_remaining_label.configure(text=f"Remaining: {text.remaining}")
 
     def start_update_download(self) -> None:
-        messagebox.showinfo("Software Update", "Update download will be available after the update flow is enabled.", parent=self)
+        if self.is_extract_running():
+            messagebox.showwarning("Software Update", "Order extraction is running. Please wait for it to finish before updating.", parent=self)
+            return
+        info = self.update_info
+        if info is None:
+            self.start_manual_update_check()
+            return
+        self.update_cancel_event = threading.Event()
+        self.render_update_state("downloading", info.version)
+        self.set_running_state(True)
+        self.update_worker_thread = threading.Thread(target=self._download_update_worker, args=(info,), daemon=True)
+        self.update_worker_thread.start()
+        self.after(100, self.poll_update_queue)
 
     def stop_update_download(self) -> None:
         if self.update_cancel_event is not None:
             self.update_cancel_event.set()
+        if self.update_action_button is not None:
+            self.update_action_button.configure(text="Stopping...", state=tk.DISABLED)
+
+    def _download_update_worker(self, info: UpdateInfo) -> None:
+        try:
+            package = download_update(
+                info,
+                cancel_event=self.update_cancel_event,
+                progress_callback=lambda progress: self.update_queue.put(("progress", progress)),
+            )
+            self.update_queue.put(("downloaded", (package, info.version)))
+        except UpdateCancelled:
+            self.update_queue.put(("cancelled", None))
+        except Exception as exc:
+            self.update_queue.put(("failed", str(exc)))
+
+    def prepare_install_update(self, package: Path, latest_version: str) -> None:
+        self.render_update_state("preparing_install", latest_version)
+        try:
+            updater_exe = runtime_base_dir() / "updater.exe"
+            updater_script = runtime_base_dir() / "updater.py"
+            if updater_exe.exists():
+                temporary_updater = package.parent / "updater.exe"
+                shutil.copy2(updater_exe, temporary_updater)
+                command = [str(temporary_updater)]
+            elif updater_script.exists():
+                command = [sys.executable, str(updater_script)]
+            else:
+                raise FileNotFoundError("Could not find updater.exe or updater.py.")
+            restart_target = Path(sys.executable).resolve() if getattr(sys, "frozen", False) else Path(__file__).resolve()
+            command.extend(
+                [
+                    "--package",
+                    str(package),
+                    "--install-dir",
+                    str(runtime_base_dir()),
+                    "--parent-pid",
+                    str(os.getpid()),
+                    "--restart",
+                    str(restart_target),
+                ]
+            )
+            subprocess.Popen(command, cwd=runtime_base_dir())
+        except Exception as exc:
+            self.set_running_state(False)
+            self.update_cancel_event = None
+            self.render_update_state("failed", latest_version, error=str(exc))
+            return
+        self.render_update_state("updater_started", latest_version)
+        self.after(300, self.destroy)
 
     def open_path(self, path_text: str, missing_message: str) -> None:
         if not path_text:
