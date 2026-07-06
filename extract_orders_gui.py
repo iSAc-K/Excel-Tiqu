@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import os
 import queue
+import shutil
 import site
+import subprocess
 import sys
 import threading
 import traceback
@@ -33,6 +35,23 @@ def add_dependency_paths() -> None:
 add_dependency_paths()
 
 import customtkinter as ctk
+
+from excel_update_core import (
+    UpdateStatus,
+    build_update_progress_text,
+    build_update_status_text,
+    can_cancel_update,
+    can_close_update_window,
+    read_version,
+)
+from update_manager import (
+    DownloadProgress,
+    UpdateCancelled,
+    UpdateInfo,
+    download_update,
+    fetch_update_info_with_retry,
+    is_newer_version,
+)
 
 
 DEFAULT_OUTPUT_NAME = "订单汇总.xlsx"
@@ -728,6 +747,21 @@ class ExtractOrdersApp(ctk.CTk):
         self.failed_archives_var = tk.StringVar(value="0")
         self.active_workers_var = tk.StringVar(value="0")
         self.report_status_var = tk.StringVar(value="还没有处理结果")
+        self.current_version = read_version(runtime_base_dir()) or "3.0"
+        self.update_queue: queue.Queue[tuple[str, Any]] = queue.Queue()
+        self.update_worker_thread: threading.Thread | None = None
+        self.update_cancel_event: threading.Event | None = None
+        self.update_info: UpdateInfo | None = None
+        self.update_status: UpdateStatus = "latest"
+        self.update_latest_version = ""
+        self.update_window: ctk.CTkToplevel | None = None
+        self.update_status_label: ctk.CTkLabel | None = None
+        self.update_progress_bar: ctk.CTkProgressBar | None = None
+        self.update_percent_label: ctk.CTkLabel | None = None
+        self.update_downloaded_label: ctk.CTkLabel | None = None
+        self.update_speed_label: ctk.CTkLabel | None = None
+        self.update_remaining_label: ctk.CTkLabel | None = None
+        self.update_action_button: ctk.CTkButton | None = None
 
         self.nav_buttons: dict[str, ctk.CTkButton] = {}
         self.pages: dict[str, ctk.CTkFrame] = {}
@@ -738,6 +772,7 @@ class ExtractOrdersApp(ctk.CTk):
         self.ensure_default_category_config()
         self.update_top_status()
         self.switch_page(self.selected_page)
+        self.after(1200, self.check_for_updates_async)
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def _build_ui(self) -> None:
@@ -1001,9 +1036,11 @@ class ExtractOrdersApp(ctk.CTk):
         self.category_config_button.grid(row=2, column=0, sticky="ew", padx=18, pady=(0, 10))
         self.category_candidates_button = ctk.CTkButton(config_panel, text="新品类候选确认", height=38, command=self.open_category_candidates)
         self.category_candidates_button.grid(row=3, column=0, sticky="ew", padx=18, pady=(0, 10))
-        ctk.CTkButton(config_panel, text="打开程序 logs 文件夹", height=38, fg_color="#4b5563", command=self.open_logs_folder).grid(row=4, column=0, sticky="ew", padx=18, pady=(0, 10))
-        ctk.CTkButton(config_panel, text="打开输出文件夹", height=38, fg_color="#4b5563", command=self.open_output_folder).grid(row=5, column=0, sticky="ew", padx=18, pady=(0, 10))
-        ctk.CTkLabel(config_panel, text=f"配置文件：\n{app_settings_path()}", wraplength=260, justify="left", text_color="#64748b").grid(row=6, column=0, sticky="ew", padx=18, pady=(16, 0))
+        self.update_entry_button = ctk.CTkButton(config_panel, text="软件更新", height=38, fg_color="#0f766e", command=self.open_update_window)
+        self.update_entry_button.grid(row=4, column=0, sticky="ew", padx=18, pady=(0, 10))
+        ctk.CTkButton(config_panel, text="打开程序 logs 文件夹", height=38, fg_color="#4b5563", command=self.open_logs_folder).grid(row=5, column=0, sticky="ew", padx=18, pady=(0, 10))
+        ctk.CTkButton(config_panel, text="打开输出文件夹", height=38, fg_color="#4b5563", command=self.open_output_folder).grid(row=6, column=0, sticky="ew", padx=18, pady=(0, 10))
+        ctk.CTkLabel(config_panel, text=f"配置文件：\n{app_settings_path()}", wraplength=260, justify="left", text_color="#64748b").grid(row=7, column=0, sticky="ew", padx=18, pady=(16, 0))
 
         self.update_report_buttons()
         self.replace_stats("还没有处理结果。")
@@ -1120,6 +1157,246 @@ class ExtractOrdersApp(ctk.CTk):
             return
         NewCategoryCandidatesWindow(self, category_config_path(), candidates)
 
+    def is_extract_running(self) -> bool:
+        return bool(self.worker_thread and self.worker_thread.is_alive())
+
+    def check_for_updates_async(self) -> None:
+        if self.update_worker_thread and self.update_worker_thread.is_alive():
+            return
+        self.update_worker_thread = threading.Thread(target=self._check_for_updates_worker, daemon=True)
+        self.update_worker_thread.start()
+        self.after(100, self.poll_update_queue)
+
+    def _check_for_updates_worker(self) -> None:
+        try:
+            info = fetch_update_info_with_retry()
+        except Exception as exc:
+            self.update_queue.put(("check_failed", str(exc)))
+            return
+        self.update_queue.put(("check_done", info))
+
+    def start_manual_update_check(self) -> None:
+        if self.update_status in {"downloading", "verifying", "preparing_install", "updater_started"}:
+            return
+        self.render_update_state("checking")
+        self.check_for_updates_async()
+
+    def open_update_window(self) -> None:
+        if self.update_window is not None and self.update_window.winfo_exists():
+            self.update_window.lift()
+            self.update_window.focus_force()
+            return
+        window = ctk.CTkToplevel(self)
+        self.update_window = window
+        window.title("软件更新")
+        window.geometry("560x360")
+        window.minsize(520, 340)
+        window.transient(self)
+        window.protocol("WM_DELETE_WINDOW", self.close_update_window)
+        window.grid_columnconfigure(0, weight=1)
+
+        self.update_status_label = ctk.CTkLabel(
+            window,
+            text="",
+            justify="left",
+            anchor="w",
+            wraplength=500,
+            font=ctk.CTkFont(size=14),
+        )
+        self.update_status_label.grid(row=0, column=0, sticky="ew", padx=24, pady=(24, 14))
+
+        self.update_progress_bar = ctk.CTkProgressBar(window, width=420)
+        self.update_progress_bar.grid(row=1, column=0, sticky="ew", padx=24, pady=(0, 8))
+        self.update_progress_bar.set(0)
+
+        self.update_percent_label = ctk.CTkLabel(window, text="0%")
+        self.update_percent_label.grid(row=2, column=0, sticky="w", padx=24)
+
+        metrics = ctk.CTkFrame(window, fg_color="transparent")
+        metrics.grid(row=3, column=0, sticky="ew", padx=24, pady=(8, 16))
+        metrics.grid_columnconfigure((0, 1, 2), weight=1)
+        self.update_downloaded_label = ctk.CTkLabel(metrics, text="Downloaded: 0 B")
+        self.update_downloaded_label.grid(row=0, column=0, sticky="w")
+        self.update_speed_label = ctk.CTkLabel(metrics, text="Speed: 0 B/s")
+        self.update_speed_label.grid(row=0, column=1, sticky="w")
+        self.update_remaining_label = ctk.CTkLabel(metrics, text="Remaining: Calculating")
+        self.update_remaining_label.grid(row=0, column=2, sticky="w")
+
+        self.update_action_button = ctk.CTkButton(window, text="Check Again", command=self.start_manual_update_check)
+        self.update_action_button.grid(row=4, column=0, sticky="ew", padx=80, pady=(6, 24))
+        self.render_update_state(self.update_status, self.update_latest_version)
+        if self.update_status == "latest" and not self.update_latest_version:
+            self.start_manual_update_check()
+
+    def close_update_window(self) -> None:
+        if not can_close_update_window(self.update_status):
+            if self.update_window is not None and self.update_window.winfo_exists():
+                self.update_window.lift()
+                self.update_window.focus_force()
+            return
+        if self.update_window is not None:
+            self.update_window.destroy()
+        self.update_window = None
+
+    def render_update_state(
+        self,
+        status: UpdateStatus,
+        latest_version: str = "",
+        notes: list[str] | None = None,
+        error: str = "",
+    ) -> None:
+        self.update_status = status
+        if latest_version:
+            self.update_latest_version = latest_version
+        if self.update_status_label is not None:
+            self.update_status_label.configure(
+                text=build_update_status_text(
+                    status,
+                    self.current_version,
+                    self.update_latest_version,
+                    notes,
+                    error,
+                )
+            )
+        if self.update_action_button is None:
+            return
+        if status == "checking":
+            self.update_action_button.configure(text="Checking...", state=tk.DISABLED, command=lambda: None)
+        elif status == "available":
+            self.update_action_button.configure(text="Update Now", state=tk.NORMAL, command=self.start_update_download)
+        elif can_cancel_update(status):
+            self.update_action_button.configure(text="Stop Update", state=tk.NORMAL, command=self.stop_update_download)
+        elif status in {"preparing_install", "updater_started"}:
+            self.update_action_button.configure(text="Installing...", state=tk.DISABLED, command=lambda: None)
+        else:
+            self.update_action_button.configure(text="Check Again", state=tk.NORMAL, command=self.start_manual_update_check)
+
+    def render_update_progress(self, progress: DownloadProgress) -> None:
+        text = build_update_progress_text(progress)
+        if progress.phase == "downloading" and self.update_status != "downloading":
+            self.render_update_state("downloading", self.update_latest_version)
+        elif progress.phase in {"verifying", "verified"} and self.update_status == "downloading":
+            self.render_update_state("verifying", self.update_latest_version)
+        if self.update_progress_bar is not None:
+            self.update_progress_bar.stop()
+            self.update_progress_bar.configure(mode="indeterminate" if text.indeterminate else "determinate")
+            if text.indeterminate:
+                self.update_progress_bar.start()
+            else:
+                self.update_progress_bar.set(text.value)
+        if self.update_percent_label is not None:
+            self.update_percent_label.configure(text=text.percent)
+        if self.update_downloaded_label is not None:
+            self.update_downloaded_label.configure(text=f"Downloaded: {text.downloaded}")
+        if self.update_speed_label is not None:
+            self.update_speed_label.configure(text=f"Speed: {text.speed}")
+        if self.update_remaining_label is not None:
+            self.update_remaining_label.configure(text=f"Remaining: {text.remaining}")
+
+    def poll_update_queue(self) -> None:
+        while True:
+            try:
+                kind, payload = self.update_queue.get_nowait()
+            except queue.Empty:
+                break
+            if kind == "check_done":
+                info = payload
+                latest_version = str(getattr(info, "version"))
+                if is_newer_version(latest_version, self.current_version):
+                    self.update_info = info
+                    self.render_update_state("available", latest_version, list(getattr(info, "notes", [])))
+                    if self.update_window is None or not self.update_window.winfo_exists():
+                        self.open_update_window()
+                elif self.update_window is not None and self.update_window.winfo_exists():
+                    self.render_update_state("latest", latest_version)
+            elif kind == "check_failed":
+                if self.update_window is not None and self.update_window.winfo_exists():
+                    self.render_update_state("failed", error=str(payload))
+            elif kind == "progress" and isinstance(payload, DownloadProgress):
+                self.render_update_progress(payload)
+            elif kind == "downloaded":
+                package, latest_version = payload
+                self.prepare_install_update(Path(package), str(latest_version))
+            elif kind == "cancelled":
+                self.set_running_state(False)
+                self.render_update_state("cancelled", self.update_latest_version)
+                self.update_cancel_event = None
+            elif kind == "failed":
+                self.set_running_state(False)
+                self.render_update_state("failed", self.update_latest_version, error=str(payload))
+                self.update_cancel_event = None
+        if self.update_worker_thread and self.update_worker_thread.is_alive():
+            self.after(100, self.poll_update_queue)
+
+    def start_update_download(self) -> None:
+        if self.is_extract_running():
+            messagebox.showwarning("Software Update", "Order extraction is running. Please wait for it to finish before updating.", parent=self)
+            return
+        info = self.update_info
+        if info is None:
+            self.start_manual_update_check()
+            return
+        self.update_cancel_event = threading.Event()
+        self.render_update_state("downloading", str(getattr(info, "version")))
+        self.set_running_state(True)
+        self.update_worker_thread = threading.Thread(target=self._download_update_worker, args=(info,), daemon=True)
+        self.update_worker_thread.start()
+        self.after(100, self.poll_update_queue)
+
+    def stop_update_download(self) -> None:
+        if self.update_cancel_event is not None:
+            self.update_cancel_event.set()
+        if self.update_action_button is not None:
+            self.update_action_button.configure(text="Stopping...", state=tk.DISABLED)
+
+    def _download_update_worker(self, info: UpdateInfo) -> None:
+        try:
+            package = download_update(
+                info,
+                cancel_event=self.update_cancel_event,
+                progress_callback=lambda progress: self.update_queue.put(("progress", progress)),
+            )
+            self.update_queue.put(("downloaded", (package, str(getattr(info, "version")))))
+        except UpdateCancelled:
+            self.update_queue.put(("cancelled", None))
+        except Exception as exc:
+            self.update_queue.put(("failed", str(exc)))
+
+    def prepare_install_update(self, package: Path, latest_version: str) -> None:
+        self.render_update_state("preparing_install", latest_version)
+        try:
+            updater_exe = runtime_base_dir() / "updater.exe"
+            updater_script = runtime_base_dir() / "updater.py"
+            if updater_exe.exists():
+                temporary_updater = package.parent / "updater.exe"
+                shutil.copy2(updater_exe, temporary_updater)
+                command = [str(temporary_updater)]
+            elif updater_script.exists():
+                command = [sys.executable, str(updater_script)]
+            else:
+                raise FileNotFoundError("Could not find updater.exe or updater.py.")
+            restart_target = Path(sys.executable).resolve() if getattr(sys, "frozen", False) else Path(__file__).resolve()
+            command.extend(
+                [
+                    "--package",
+                    str(package),
+                    "--install-dir",
+                    str(runtime_base_dir()),
+                    "--parent-pid",
+                    str(os.getpid()),
+                    "--restart",
+                    str(restart_target),
+                ]
+            )
+            subprocess.Popen(command, cwd=runtime_base_dir())
+        except Exception as exc:
+            self.set_running_state(False)
+            self.update_cancel_event = None
+            self.render_update_state("failed", latest_version, error=str(exc))
+            return
+        self.render_update_state("updater_started", latest_version)
+        self.after(300, self.destroy)
+
     def choose_input_folder(self) -> None:
         folder = filedialog.askdirectory(title="选择压缩包所在文件夹")
         if folder:
@@ -1176,6 +1453,9 @@ class ExtractOrdersApp(ctk.CTk):
         return workers
 
     def start_extract(self) -> None:
+        if self.update_status in {"downloading", "verifying", "preparing_install", "updater_started"}:
+            messagebox.showwarning("Software Update", "The app is updating. Please wait for the update to finish.", parent=self)
+            return
         valid, input_path, output_path = self.validate_inputs()
         if not valid:
             return
@@ -1357,6 +1637,8 @@ class ExtractOrdersApp(ctk.CTk):
         self.category_config_button.configure(state=state)
         self.category_candidates_button.configure(state=state)
         self.export_errors_button.configure(state=state)
+        if hasattr(self, "update_entry_button"):
+            self.update_entry_button.configure(state=state)
 
     def update_progress(self, payload: dict[str, Any]) -> None:
         total = int(payload.get("total") or 0)

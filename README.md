@@ -293,6 +293,31 @@ app_settings.json
 
 用户可编辑的配置文件放在 EXE 同级目录，不会放到 PyInstaller 临时目录。
 
+## 12.1 软件更新
+
+Windows GUI 会从 `VERSION.txt` 读取本地版本，并检查 GitHub Releases 上的更新清单：
+
+```text
+https://github.com/iSAc-K/Excel-Tiqu/releases/latest/download/update.json
+```
+
+发现新版本后，用户可以在 GUI 的“报告与配置”页面点击“软件更新”。工具会下载发布 ZIP、校验 SHA-256、启动 `updater.exe`，然后退出主程序，由独立更新器替换程序文件。
+
+更新器会保留这些用户文件和目录：
+
+- `category_config.json`
+- `app_settings.json`
+- `logs/`
+- `backups/`
+
+生成发布 ZIP 和 `update.json`：
+
+```powershell
+$env:BUILD_RELEASE_ZIP='1'
+$env:CODEX_NO_OPEN_EXPLORER='1'
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build_exe.ps1
+```
+
 ## 13. 如何验证 v1.4 是否正常
 
 验证 CLI：
