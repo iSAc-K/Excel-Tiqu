@@ -1,14 +1,18 @@
 $ErrorActionPreference = "Stop"
 
 $depsDir = Join-Path $PSScriptRoot ".codex_test_deps"
-python -m pip install --upgrade --target $depsDir -r requirements.txt
-python -m pip install --upgrade --target $depsDir pyinstaller
+if ($env:SKIP_DEP_INSTALL -ne "1") {
+    python -m pip install --upgrade --target $depsDir -r requirements.txt
+    python -m pip install --upgrade --target $depsDir pyinstaller
+}
 
 $oldPythonPath = $env:PYTHONPATH
-if ([string]::IsNullOrWhiteSpace($oldPythonPath)) {
-    $env:PYTHONPATH = $depsDir
-} else {
-    $env:PYTHONPATH = $depsDir + ";" + $oldPythonPath
+if (Test-Path $depsDir) {
+    if ([string]::IsNullOrWhiteSpace($oldPythonPath)) {
+        $env:PYTHONPATH = $depsDir
+    } else {
+        $env:PYTHONPATH = $depsDir + ";" + $oldPythonPath
+    }
 }
 
 $versionLine = Get-Content -LiteralPath (Join-Path $PSScriptRoot "VERSION.txt") | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 1
