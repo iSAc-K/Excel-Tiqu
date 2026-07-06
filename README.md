@@ -279,13 +279,15 @@ HC 过滤默认关闭。关闭时，文件名包含 `HC`（不区分大小写）
 打包完成后会生成文件夹版 EXE：
 
 ```text
-dist/Excel订单数据提取工具_v1.4/
+dist/Excel订单数据提取工具_v2.1/
 ```
 
 该目录会包含：
 
 ```text
-Excel订单数据提取工具_v1.4.exe
+Excel订单数据提取工具_v2.1.exe
+updater.exe
+VERSION.txt
 README.md
 category_config.json
 app_settings.json
@@ -293,7 +295,32 @@ app_settings.json
 
 用户可编辑的配置文件放在 EXE 同级目录，不会放到 PyInstaller 临时目录。
 
-## 13. 如何验证 v1.4 是否正常
+## 13. Software Update
+
+Windows GUI can check GitHub Releases for updates. The app reads the local version from `VERSION.txt` and checks:
+
+```text
+https://github.com/iSAc-K/Excel-Tiqu/releases/latest/download/update.json
+```
+
+When a newer version exists, choose `Software Update` in the GUI. The app downloads the release ZIP, verifies SHA-256, starts `updater.exe`, exits, and lets the updater replace program files.
+
+The updater preserves:
+
+- `category_config.json`
+- `app_settings.json`
+- `logs/`
+- `backups/`
+
+Release builds can generate the ZIP and `update.json` by running:
+
+```powershell
+$env:BUILD_RELEASE_ZIP='1'
+$env:CODEX_NO_OPEN_EXPLORER='1'
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build_exe.ps1
+```
+
+## 14. 如何验证 v2.1 是否正常
 
 验证 CLI：
 
