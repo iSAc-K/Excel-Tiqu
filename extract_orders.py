@@ -303,6 +303,41 @@ def save_confirmed_category_candidate(
     return save_category_config_data(config_data, path)
 
 
+def save_candidate_keyword_to_existing_category(
+    config_path: str | Path | None,
+    *,
+    prefix: str = "",
+    target_category: str,
+    keyword: str,
+) -> Path:
+    target_text = str(target_category).strip()
+    if not target_text:
+        raise ValueError("已有品类不能为空")
+    keyword_text = str(keyword).strip()
+    if not keyword_text:
+        raise ValueError("候选关键词不能为空")
+    prefix_text = str(prefix).strip()
+
+    path = Path(config_path).expanduser() if config_path else default_category_config_path()
+    existed_before = path.exists()
+    config_data, _, error = load_category_config_data(path, create_if_missing=True)
+    if error and existed_before:
+        raise ValueError(error)
+    if error and not existed_before and "已使用内置默认配置" not in error:
+        raise ValueError(error)
+    if target_text not in config_data.categories:
+        raise ValueError(f"已有品类不存在：{target_text}")
+
+    if prefix_text and prefix_text not in config_data.prefixes:
+        config_data.prefixes.append(prefix_text)
+
+    keywords = config_data.categories[target_text]
+    if keyword_text not in keywords:
+        keywords.append(keyword_text)
+
+    return save_category_config_data(config_data, path)
+
+
 def load_category_config(
     config_path: str | Path | None = None,
     create_if_missing: bool = False,

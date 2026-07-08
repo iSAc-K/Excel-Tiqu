@@ -544,6 +544,8 @@ class NewCategoryCandidatesWindow(ctk.CTkToplevel):
         self.current_index: int | None = None
         self.prefix_var = tk.StringVar(value="")
         self.category_var = tk.StringVar(value="")
+        self.existing_categories = self.load_existing_categories()
+        self.existing_category_var = tk.StringVar(value=self.existing_categories[0] if self.existing_categories else "")
         self.status_var = tk.StringVar(value="")
 
         self._build_ui()
@@ -553,6 +555,15 @@ class NewCategoryCandidatesWindow(ctk.CTkToplevel):
             self.candidate_listbox.activate(0)
             self.on_candidate_select()
         self.grab_set()
+
+    def load_existing_categories(self) -> list[str]:
+        try:
+            from extract_orders import load_category_config_data
+
+            config_data, _, _ = load_category_config_data(self.config_path)
+            return list(config_data.categories)
+        except Exception:
+            return []
 
     def _build_ui(self) -> None:
         self.grid_columnconfigure(0, weight=1)
@@ -596,14 +607,25 @@ class NewCategoryCandidatesWindow(ctk.CTkToplevel):
         ctk.CTkEntry(right, textvariable=self.prefix_var, height=36).grid(row=2, column=1, sticky="ew", padx=(0, 14), pady=(0, 10))
         ctk.CTkLabel(right, text="品类").grid(row=3, column=0, sticky="w", padx=(14, 8), pady=(0, 10))
         ctk.CTkEntry(right, textvariable=self.category_var, height=36).grid(row=3, column=1, sticky="ew", padx=(0, 14), pady=(0, 10))
+        ctk.CTkLabel(right, text="已有品类").grid(row=4, column=0, sticky="w", padx=(14, 8), pady=(0, 10))
+        self.existing_category_menu = ctk.CTkOptionMenu(
+            right,
+            variable=self.existing_category_var,
+            values=self.existing_categories or ["无可用品类"],
+            height=36,
+        )
+        self.existing_category_menu.grid(row=4, column=1, sticky="ew", padx=(0, 14), pady=(0, 10))
+        if not self.existing_categories:
+            self.existing_category_menu.configure(state=tk.DISABLED)
 
         actions = ctk.CTkFrame(right, fg_color="transparent")
-        actions.grid(row=4, column=0, columnspan=2, sticky="ew", padx=14, pady=(4, 12))
+        actions.grid(row=5, column=0, columnspan=2, sticky="ew", padx=14, pady=(4, 12))
         ctk.CTkButton(actions, text="按前缀重新切分", width=126, fg_color="#4b5563", command=self.resplit_by_prefix).pack(side=tk.LEFT)
         ctk.CTkButton(actions, text="保存为新品类", width=116, command=self.save_candidate).pack(side=tk.LEFT, padx=8)
+        ctk.CTkButton(actions, text="保存到已有品类", width=128, fg_color="#0f766e", command=self.save_to_existing_category).pack(side=tk.LEFT, padx=(0, 8))
         ctk.CTkButton(actions, text="忽略此候选", width=108, fg_color="#9f1239", command=self.ignore_candidate).pack(side=tk.LEFT)
 
-        ctk.CTkLabel(right, textvariable=self.status_var, anchor="w", text_color="#5b6675").grid(row=5, column=0, columnspan=2, sticky="ew", padx=14, pady=(0, 14))
+        ctk.CTkLabel(right, textvariable=self.status_var, anchor="w", text_color="#5b6675").grid(row=6, column=0, columnspan=2, sticky="ew", padx=14, pady=(0, 14))
 
         footer = ctk.CTkFrame(self, fg_color="transparent")
         footer.grid(row=2, column=0, sticky="ew", padx=20, pady=(2, 18))
@@ -695,6 +717,33 @@ class NewCategoryCandidatesWindow(ctk.CTkToplevel):
             return
         self.update_current_candidate(status="已保存")
         messagebox.showinfo("保存成功", "新品类候选已保存到品类关键词配置。", parent=self)
+
+    def save_to_existing_category(self) -> None:
+        if self.current_index is None:
+            return
+        prefix = self.prefix_var.get().strip()
+        keyword = self.category_var.get().strip()
+        target_category = self.existing_category_var.get().strip()
+        if not keyword:
+            messagebox.showwarning("新品类候选", "候选关键词不能为空。", parent=self)
+            return
+        if not target_category or target_category == "无可用品类":
+            messagebox.showwarning("新品类候选", "请选择已有品类。", parent=self)
+            return
+        try:
+            from extract_orders import save_candidate_keyword_to_existing_category
+
+            save_candidate_keyword_to_existing_category(
+                self.config_path,
+                prefix=prefix,
+                target_category=target_category,
+                keyword=keyword,
+            )
+        except Exception as exc:
+            messagebox.showerror("保存失败", f"保存到已有品类失败：{exc}", parent=self)
+            return
+        self.update_current_candidate(status=f"已保存到已有品类：{target_category}")
+        messagebox.showinfo("保存成功", f"候选关键词已保存到已有品类：{target_category}", parent=self)
 
     def ignore_candidate(self) -> None:
         if self.current_index is None:

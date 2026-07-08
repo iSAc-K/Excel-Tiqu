@@ -292,6 +292,54 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual(config_data.prefixes, ["HAL"])
         self.assertEqual(config_data.categories["方白名片架"], ["方白名片架"])
 
+    def test_save_candidate_keyword_to_existing_category_preserves_category_and_prefix(self) -> None:
+        existing_category = "\u5fc3\u5f62\u94a5\u5319\u6263"
+        candidate_keyword = "CBZ-\u5fc3\u5f62\u94a5\u5319\u6263\u6263"
+        self.category_config_path.write_text(
+            json.dumps(
+                {
+                    "prefixes": ["HAL"],
+                    "categories": {
+                        existing_category: [existing_category],
+                        "\u5c0f\u94a2\u7247": ["\u5c0f\u94a2\u7247"],
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        from extract_orders import save_candidate_keyword_to_existing_category, load_category_config_data
+
+        save_candidate_keyword_to_existing_category(
+            self.category_config_path,
+            prefix="CBZ",
+            target_category=existing_category,
+            keyword=candidate_keyword,
+        )
+
+        config_data, _, error = load_category_config_data(self.category_config_path)
+        self.assertEqual(error, "")
+        self.assertEqual(config_data.prefixes, ["HAL", "CBZ"])
+        self.assertEqual(config_data.categories[existing_category], [existing_category, candidate_keyword])
+        self.assertNotIn(candidate_keyword, config_data.categories)
+
+    def test_save_candidate_keyword_to_existing_category_rejects_missing_category(self) -> None:
+        existing_category = "\u5fc3\u5f62\u94a5\u5319\u6263"
+        self.category_config_path.write_text(
+            json.dumps({existing_category: [existing_category]}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        from extract_orders import save_candidate_keyword_to_existing_category
+
+        with self.assertRaises(ValueError):
+            save_candidate_keyword_to_existing_category(
+                self.category_config_path,
+                target_category="\u4e0d\u5b58\u5728",
+                keyword="CBZ-\u5fc3\u5f62\u94a5\u5319\u6263\u6263",
+            )
+
     def test_category_config_window_preserves_prefixes_when_saving_keywords(self) -> None:
         self.category_config_path.write_text(
             json.dumps(
@@ -330,6 +378,52 @@ class CoreRegressionTests(unittest.TestCase):
         self.assertEqual(config_data.prefixes, ["HAL", "WZY"])
         self.assertEqual(config_data.categories["方白名片架"], ["方白名片架", "新关键词"])
         self.assertTrue(window.master.saved)
+
+    def test_candidate_window_save_to_existing_category_updates_live_candidate(self) -> None:
+        import tkinter as tk
+        import extract_orders_gui
+
+        existing_category = "\u5fc3\u5f62\u94a5\u5319\u6263"
+        candidate_keyword = "\u5fc3\u5f62\u94a5\u5319\u6263\u6263"
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            self.category_config_path.write_text(
+                json.dumps({existing_category: [existing_category]}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            candidates = [{"prefix": "CBZ", "category": "CBZ-\u5fc3\u5f62\u94a5\u5319\u6263\u6263", "status": "\u5f85\u786e\u8ba4"}]
+            window = object.__new__(extract_orders_gui.NewCategoryCandidatesWindow)
+            window.config_path = self.category_config_path
+            window.candidates = candidates
+            window.current_index = 0
+            window.prefix_var = tk.StringVar(root, value="CBZ")
+            window.category_var = tk.StringVar(root, value=candidate_keyword)
+            window.existing_category_var = tk.StringVar(root, value=existing_category)
+            window.refresh_candidates = lambda: None
+            window.on_candidate_select = lambda _event=None: None
+            window.candidate_listbox = type(
+                "DummyListbox",
+                (),
+                {"selection_set": lambda *_: None, "activate": lambda *_: None, "see": lambda *_: None},
+            )()
+
+            with (
+                patch.object(extract_orders_gui.messagebox, "showinfo"),
+                patch.object(extract_orders_gui.messagebox, "showwarning"),
+                patch.object(extract_orders_gui.messagebox, "showerror"),
+            ):
+                window.save_to_existing_category()
+
+            from extract_orders import load_category_config_data
+
+            config_data, _, error = load_category_config_data(self.category_config_path)
+            self.assertEqual(error, "")
+            self.assertEqual(config_data.prefixes, ["CBZ"])
+            self.assertEqual(config_data.categories[existing_category], [existing_category, candidate_keyword])
+            self.assertEqual(candidates[0]["status"], f"\u5df2\u4fdd\u5b58\u5230\u5df2\u6709\u54c1\u7c7b\uff1a{existing_category}")
+        finally:
+            root.destroy()
 
     def test_save_confirmed_category_candidate_rejects_invalid_existing_config(self) -> None:
         invalid_json = "{ invalid json"
