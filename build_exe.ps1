@@ -26,13 +26,12 @@ $appName = "Excel" + [char]0x8BA2 + [char]0x5355 + [char]0x6570 + [char]0x636E +
 python -m PyInstaller --noconfirm --clean --windowed --onedir --name $appName --hidden-import extract_orders --collect-all customtkinter extract_orders_gui.py
 
 $updaterName = "updater"
-python -m PyInstaller --noconfirm --clean --windowed --onedir --name $updaterName --collect-all customtkinter updater.py
+python -m PyInstaller --noconfirm --clean --windowed --onefile --name $updaterName --collect-all customtkinter updater.py
 
 $env:PYTHONPATH = $oldPythonPath
 
 $distDir = Join-Path ".\dist" $appName
-$updaterDist = Join-Path ".\dist" $updaterName
-$updaterExe = Join-Path $updaterDist "updater.exe"
+$updaterExe = Join-Path ".\dist" "updater.exe"
 if (-not (Test-Path $updaterExe)) {
     throw "updater.exe was not built: $updaterExe"
 }

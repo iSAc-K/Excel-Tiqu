@@ -16,6 +16,12 @@ def make_zip(path: Path, entries: dict[str, bytes]) -> None:
 
 
 class UpdaterTests(unittest.TestCase):
+    def test_build_script_packages_updater_as_onefile(self) -> None:
+        script = Path("build_exe.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("--onefile --name $updaterName", script)
+        self.assertNotIn("--onedir --name $updaterName", script)
+
     def test_extract_rejects_zip_slip(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
